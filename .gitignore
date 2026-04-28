@@ -1,11 +1,15 @@
-# Visual Studio
+﻿# Visual Studio / IDE
 .vs/
+.vscode/
+.idea/
 *.VC.db
 *.VC.opendb
 *.suo
 *.user
 *.userosscache
 *.sln.docstates
+*.opensdf
+*.ipch/
 
 # CMake / build outputs
 build/
@@ -20,6 +24,7 @@ cmake_install.cmake
 build.ninja
 .ninja_deps
 .ninja_log
+compile_commands.json
 
 # Binaries / debug files
 *.obj
@@ -31,11 +36,13 @@ build.ninja
 *.pdb
 *.idb
 *.dll
+*.appx
 
-# Runtime logs / recordings
+# Logs / recordings
+*.log
 track_test_2_runtime.log
 *.mkv
 
-# OS / editor noise
+# OS noise
 Thumbs.db
 Desktop.ini

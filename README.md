@@ -1,155 +1,168 @@
-# track_pinspot_cpp
+﻿# track_pinspot_cpp
 
-Azure Kinect と PTU を使った追従型ピンスポット制御プロジェクトです。  
-現在は **Azure Kinect 2台の有線同期** と **`base` 側 body tracking + `aux` 側 depth-only 補正** を主軸に整理しています。
+Azure Kinect 2台を使った同期計測と、`base` 側 body tracking と `aux` 側 depth を組み合わせた座標補正を検証するための C++ プロジェクトです。
 
-## プロジェクト概要
+現時点の主方針は、2台同時 body tracking ではなく、次の構成です。
 
-- `track_test.cpp`
-  1台構成の既存版です。body tracking の基準実装として使います。
-- `track_test_2.cpp`
-  2台構成の現行実装です。`base` のみ body tracking、`aux` は depth-only で使います。
-- `track_config_2.json`
-  現在の推奨設定です。`gpu_cuda + dnn_model_2_0_lite_op11.onnx` を使います。
-- `track_config_2_bt_cpu.json`
-  CPU body tracking で切り分けるための設定です。
-- `track_config_2_bt_cuda.json`
-  CUDA + フル model の切り分け設定です。
-- `track_config_2_bt_cuda_lite.json`
-  CUDA + lite model の切り分け設定です。
-- `track_config_2_capture_only.json`
-  body tracking を切って 2台同期 capture のみ確認する設定です。
+- `base`: body tracking を実行する主センサ
+- `aux`: 有線同期された補助センサ。body tracking は行わず depth のみを利用
+- 最終融合: `base` の `x, y` と `aux` 由来の `z` を組み合わせる
 
 ## 現在の到達点
 
-- 2台の Azure Kinect を `MASTER / SUBORDINATE` で有線同期するところまでは確認済みです。
-- `k4arecorder` でも subordinate を先に起動し、master を後起動すると同期録画できることを確認しています。
-- アプリ内でも `phase_delta_us` / `phase_error_us` を使った同期診断を入れており、安定ログでは位相差が小さく保たれています。
-- 現時点で最も安定している条件は、`gpu_cuda + dnn_model_2_0_lite_op11.onnx` です。
-- 2台同時 body tracking は安定しなかったため、現在は `base body tracking + aux depth-only` 構成に落ち着いています。
+- Azure Kinect 2台の `MASTER / SUBORDINATE` 有線同期は確認済み
+- アプリ内でも `phase_delta_us` / `phase_error_us` により同期状態を監視できる
+- `base body tracking + aux depth-only` 構成が現実的な方式として成立
+- `gpu_cuda + dnn_model_2_0_lite_op11.onnx` が、現時点で最も安定していた構成
 
-## ここまでの主な変更経緯
+## 背景
 
-### 1. 1台版から2台版へ拡張
+当初は `base` と `aux` の両方で body tracking を起動し、それぞれの骨格結果を融合する構成を想定していました。
 
-元々は `track_test.cpp` の 1台 body tracking 実装を基に、2台の Azure Kinect を同時に使う構成へ拡張しました。
+しかし検証の結果、次の問題がありました。
 
-### 2. 2台同時 body tracking を試行
+- `aux` 側の `k4abt_tracker_create()` が安定しない
+- 2台同期 capture はできても、GPU body tracking の負荷下で `aux` の更新が止まりやすい
+- 特に `gpu_directml` や `gpu_cuda + full model` では、`aux capture stopped updating` が出やすかった
 
-当初は `base` と `aux` の両方で body tracking を行い、両者の骨格結果を融合する方針でした。  
-しかし `track_test_2.cpp` では `aux` 側の `k4abt_tracker_create()` が安定せず、この方針は採用しないことにしました。
+そのため現在は、2台同時 body tracking ではなく、
 
-### 3. 方針転換: `base` のみ body tracking、`aux` は depth-only
+- `base`: body tracking
+- `aux`: depth-only
 
-その後、`base` だけで人物追跡を行い、`aux` は body tracking をせず depth だけ使う構成へ切り替えました。  
-目的は、`base` が推定した 3D 関節位置に対して、`aux` 側 depth から奥行きを補正することです。
+という役割分担に切り替えています。
 
-### 4. 2台同期の確認と同期診断の整備
+## 同期について
 
-アプリ実行時に `aux` が timeout することがあったため、最初はハードウェア同期失敗を疑いました。  
-しかし `k4arecorder` による確認で有線同期自体は成立していることが分かりました。
+### ハードウェア同期
 
-そのうえで、アプリ内には次の同期診断を追加しました。
+2台の Azure Kinect は `MASTER / SUBORDINATE` の有線同期で動作させます。
+
+- `base`: `MASTER`
+- `aux`: `SUBORDINATE`
+- `subordinate_delay_off_master_usec = 160`
+
+`k4arecorder` でも subordinate を先に起動し、その後 master を起動することで録画開始できることを確認しています。
+
+### アプリ内の同期判定
+
+アプリ内では depth timestamp から次の値を計算しています。
 
 - `raw_delta_us`
-  `aux_depth_ts_us - base_depth_ts_us`
+  - `aux_depth_ts_us - base_depth_ts_us`
 - `phase_delta_us`
-  1フレーム周期で折りたたんだ位相差
+  - `raw_delta_us` を1フレーム周期で折りたたんだ位相差
 - `baseline_phase_delta_us`
-  初期フレームから学習した基準位相差
+  - 初期フレームから学習した基準位相差
 - `phase_error_us`
-  現在の位相差が基準からどれだけ外れているか
+  - 現在の位相差が基準からどれだけずれているか
 
-この診断により、「同期そのものは取れているが、ストリーム継続性が崩れることがある」状態を切り分けられるようになりました。
+重要なのは `raw_delta_us` そのものではなく、`phase_error_us` が小さい範囲で安定していることです。
 
-### 5. capture 取得方式の改善
+例えば `raw_delta_us` が
 
-body tracking や描画の負荷で sensor 側の capture が詰まらないよう、`LatestCapturePump` を導入しました。
+- `11933`
+- `45267`
+- `-21400`
 
-- `aux` は専用スレッドで常時 `get_capture()`
-- `base` も専用スレッドで常時 `get_capture()`
-- main ループでは最新 capture を参照
-- body tracker には「新しい base frame だけ enqueue」する方式
+と見えても、30fps の周期 `33333us` で折りたたむと、どれもほぼ同じ位相として扱えます。
 
-これにより、2台の sensor I/O を main ループから分離しています。
+## なぜ2台同時 body tracking を採用していないか
 
-### 6. GPU モードの切り分け
+このプロジェクトでは何度か方針を切り替えています。
 
-body tracking 条件ごとに安定性を比較した結果は次の通りです。
+### 1. 1台版
+
+- `track_test.cpp`
+- 単体の Azure Kinect で body tracking を行う版
+
+### 2. 2台同時 body tracking の試行
+
+- `track_test_2.cpp` をベースに 2 台同時 tracking を試行
+- しかし `aux` 側 tracker 作成と継続動作が不安定
+
+### 3. `base body tracking + aux depth-only` へ移行
+
+- `base` が人物の関節を検出
+- `aux` は body tracking をせず、投影先近傍の depth を取得
+- `aux` の depth から `z` 成分だけを補正
+
+この方式なら、2台同時 body tracking より負荷と不安定要因を減らしつつ、奥行き補正の恩恵を受けられます。
+
+## body tracking モードの切り分け結果
+
+検証時の傾向は次の通りです。
 
 - `capture-only`: 安定
 - `body_tracking_mode=cpu`: 安定
 - `gpu_directml`: 不安定
-- `gpu_cuda + フル model`: 不安定
-- `gpu_cuda + lite model`: 安定化
+- `gpu_cuda + full model`: 不安定
+- `gpu_cuda + lite model`: 安定化傾向が強い
 
-現在の推奨条件は、`gpu_cuda + dnn_model_2_0_lite_op11.onnx` です。
+また、DXGI adapter の確認により `gpu_device_id=0` は `NVIDIA GeForce RTX 3060 Laptop GPU` を指していることを確認しています。
 
-### 7. CUDA 実行環境の整備
+そのため、現在の推奨は次です。
 
-`gpu_cuda` を使うため、CMake 側で以下の DLL を build 出力へコピーするようにしています。
-
-- `onnxruntime_providers_cuda.dll`
-- `cudart64_110.dll`
-- `cublas64_11.dll`
-- `cublasLt64_11.dll`
-- `cudnn64_8.dll`
-- `cudnn_ops_infer64_8.dll`
-- `cudnn_cnn_infer64_8.dll`
-- `cufft64_10.dll`
-- `nvrtc64_112_0.dll`
-- `nvrtc-builtins64_114.dll`
-
-また、起動時に CUDA 依存 DLL の存在を診断するログも追加しています。
+- `body_tracking_mode = gpu_cuda`
+- `gpu_device_id = 0`
+- `body_tracking_model_path = dnn_model_2_0_lite_op11.onnx`
 
 ## 現在の座標融合方針
 
-現在は 2台の骨格結果を平均するのではなく、次の方針で統合します。
+現在の融合は、2台の骨格を平均する方式ではありません。
 
-1. `base` で対象関節を body tracking する
-2. `base` の 3D 点を `aux` 座標系へ変換する
-3. その 3D 点を `aux` depth image 上へ投影する
-4. 投影先近傍の depth を探索し、候補を 3D に復元する
-5. 予測点に最も近い `aux` 側 3D 点を採用する
-6. それを `base` 座標系へ戻す
-7. 最終的に `fused = { base.x, base.y, aux由来z }` とする
+処理の流れは次の通りです。
 
-ログ上ではこの融合元を `source=base_xy + aux_depth_z` と表示します。
+1. `base` で対象関節の 3D 座標を取得する
+2. その 3D 座標を `aux` 座標系へ変換する
+3. `aux` depth image 上へ投影する
+4. 投影先近傍の depth 候補を探索し、3D に復元する
+5. 予測位置に最も近い `aux` 由来 3D 点を採用する
+6. その点を `base` 座標系へ戻す
+7. 最終的に `fused = { base.x, base.y, aux由来z }` を作る
 
-要するに、`base` が横方向・上下方向を担い、`aux` が奥行き方向を補正する構成です。
+ログではこの融合元を `source=base_xy + aux_depth_z` と表現しています。
 
-## 現在の推奨実行条件
+## この方式でできること / できないこと
 
-- body tracking: `gpu_cuda`
-- GPU: `gpu_device_id = 0`
-- model: `dnn_model_2_0_lite_op11.onnx`
-- `base`: `MASTER`
-- `aux`: `SUBORDINATE`
-- `aux` は depth-only で利用
-- ただし有線同期維持のため `aux` の color は内部的には有効
+### できること
 
-推奨 config は `track_config_2.json` です。
+- 耳や頭部など、特定点の奥行き補正
+- `base` 単独より安定した `z` 推定
+- `base` を主とした軽量な2台融合
 
-## 既知の注意点
+### できないこと
 
-- `CUDA provider probe failed ... error 1114` が出ても、その直後に `Base body tracker created with mode: gpu_cuda` が出る場合は、実際には CUDA 経路で tracker 作成に成功していることがあります。
-- `subordinate_delay_off_master_usec = 160` は subordinate の color capture タイミング設定であり、ログの `phase_delta_us` と 1:1 で一致する値ではありません。
-- `phase_delta_us` は「位相差」、`phase_error_us` は「その位相差が基準からどれだけずれたか」を表しています。
+- `aux` 単独で関節を再認識すること
+- 2台の骨格を完全に対等に融合すること
+- `base` が見失った関節を `aux` だけで復元すること
 
-## まだ未完了の項目
+つまり、`aux` は独立した認識器ではなく、`base` の補助 depth センサとして使っています。
 
-同期維持はかなり安定しましたが、最終確認はまだ残っています。
+## 主要ファイル
 
-- 実人物を入れた状態で `aux_depth=FOUND` が安定して出るか
-- `source=base_xy + aux_depth_z` で本当に奥行き補正が効いているか
-- `aux_translation_mm` / `rotation_matrix` が十分正しいか
-- `sample_aux_depth_point_for_base_joint()` の探索条件が最適か
+- `track_test.cpp`
+  - 1台版の body tracking 実験
+- `track_test_2.cpp`
+  - 2台同期・融合実験の主実装
+- `track_config.json`
+  - 1台版の設定
+- `track_config_2.json`
+  - 現行の推奨設定
+- `track_config_2_bt_cpu.json`
+  - CPU body tracking 診断用
+- `track_config_2_bt_cuda.json`
+  - CUDA + full model 診断用
+- `track_config_2_bt_cuda_lite.json`
+  - CUDA + lite model 診断用
+- `track_config_2_capture_only.json`
+  - body tracking 無効の capture-only 切り分け用
+- `CMakeLists.txt`
+  - ビルド設定と runtime DLL staging
 
-## ビルドメモ
+## ビルド
 
-- x64 でビルドする前提です。
-- Visual Studio 2022 の x64 開発環境を使う必要があります。
-- CMake は Azure Kinect SDK / Body Tracking SDK / ONNXRuntime / CUDA Toolkit を自動検出するように調整しています。
+Visual Studio 2022 の x64 開発環境でビルドします。
 
 例:
 
@@ -157,14 +170,39 @@ body tracking 条件ごとに安定性を比較した結果は次の通りです
 cmd.exe /c ""C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" -arch=amd64 -host_arch=amd64 && "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -S . -B .\build_2cam_x64 -G Ninja && "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build .\build_2cam_x64 --target track_test_cpp_2cam"
 ```
 
-## Git 管理を始めるときのメモ
+## 現在の推奨実行条件
 
-このディレクトリを Git 管理する場合は、少なくとも以下は ignore 推奨です。
+- body tracking: `gpu_cuda`
+- model: `dnn_model_2_0_lite_op11.onnx`
+- `base`: `MASTER`
+- `aux`: `SUBORDINATE`
+- `aux` は depth-only 用途
+- ただし同期維持のため、`aux` の color は内部的には有効
+
+## 既知の注意点
+
+- `CUDA provider probe failed ... error 1114` が出ても、その後に `Base body tracker created with mode: gpu_cuda` が出る場合は実運用上 tracker 作成に成功している
+- `subordinate_delay_off_master_usec = 160` は subordinate の color capture タイミング設定であり、ログ上の `phase_delta_us` と 1:1 に一致する値ではない
+- 安定動作していても、最終的には `aux_depth=FOUND` が安定して出るかどうかを別途確認する必要がある
+
+## 今後の確認事項
+
+- 実人物を入れた状態で `aux_depth=FOUND` が安定するか
+- `source=base_xy + aux_depth_z` による補正が安定して働くか
+- `aux_translation_mm` と `rotation_matrix` の精度
+- `sample_aux_depth_point_for_base_joint()` の探索条件の最適化
+
+## Git 管理メモ
+
+このリポジトリでは、ビルド成果物や検証ログを Git に含めないようにしています。
+
+主に ignore しているもの:
 
 - `.vs/`
 - `build*/`
-- `*.pdb`
-- 実行ログや一時生成物
+- `CMakeFiles/`
+- `*.obj`, `*.pdb`, `*.exe`, `*.dll`
+- `*.mkv`
+- runtime log
 
-README は「なぜ現在の構成に落ち着いたのか」を追えるように書いてあります。  
-最初のコミットでは、まずこの README と現行の `track_test_2.cpp` / `CMakeLists.txt` / `track_config_2*.json` を一緒に残すと履歴が追いやすくなります。
+GitHub 上では、この README を起点に `track_test_2.cpp`、`CMakeLists.txt`、`track_config_2*.json` を追うと、現在の構成を把握しやすいです。
