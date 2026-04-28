@@ -251,6 +251,7 @@ powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -Config
 
 | Date | Commit | Summary |
 | --- | --- | --- |
+| 2026-04-28 | `1105d31` | `aux_depth=MISSING` 時に、投影失敗・探索窓内の depth 欠損・3D 候補不足・空間誤差超過などの理由をログへ出す診断を追加。 |
 | 2026-04-28 | `51bc322` | sync baseline / phase 診断が同じ stale な aux frame を繰り返し使わないようにし、新しい base / aux frame pair のときだけ学習・判定するよう修正。 |
 | 2026-04-28 | `89fbe9e` | `track_test_2.cpp` に capture pump の generation・最終 depth timestamp・timeout/failure 回数の診断ログを追加し、stream stall の切り分けをしやすくした。 |
 | 2026-04-28 | `561a88f` | `measure_vram_bodytracking.ps1` の `$PID` 予約変数衝突を解消し、WDDM 環境でもサンプリングが途中で落ちないようにした。 |
