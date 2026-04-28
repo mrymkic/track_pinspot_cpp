@@ -251,6 +251,7 @@ powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -Config
 
 | Date | Commit | Summary |
 | --- | --- | --- |
+| 2026-04-28 | `79e4df3` | `measure_vram_bodytracking.ps1` が WDDM 環境の `[N/A]` を安全に扱えるよう修正し、VRAM CSV 取得を継続できるようにした。 |
 | 2026-04-28 | `44a4b86` | `enable_aux_body_tracking` を追加し、`gpu_cuda` で2台同時 body tracking を直接測るための dual 診断 config を追加。 |
 | 2026-04-28 | `bfca329` | body tracking 実行時の PID ログと `measure_vram_bodytracking.ps1` を追加し、VRAM サンプリングを自動化。 |
 | 2026-04-28 | `71f35ed` | README と `.gitignore` を整理し、GitHub 上で読みやすい構成に修正。 |
