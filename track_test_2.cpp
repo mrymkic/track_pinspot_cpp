@@ -812,6 +812,19 @@ struct AuxDepthSample {
     double spatial_error_mm = std::numeric_limits<double>::infinity();
 };
 
+struct AuxDepthDebugInfo {
+    std::string failure_reason = "not_attempted";
+    std::optional<std::array<double, 3>> predicted_aux_point_3d;
+    std::optional<std::array<float, 2>> predicted_depth_2d;
+    int depth_width = 0;
+    int depth_height = 0;
+    int center_x = -1;
+    int center_y = -1;
+    int nonzero_depth_candidates = 0;
+    int valid_3d_candidates = 0;
+    double best_spatial_error_mm = std::numeric_limits<double>::infinity();
+};
+
 struct KinectDeviceIdentity {
     uint32_t index = 0;
     std::string serial;
@@ -1769,14 +1782,25 @@ std::optional<AuxDepthSample> sample_aux_depth_point_for_base_joint(
     const k4a_calibration_t &aux_calibration,
     k4a_capture_t aux_capture,
     const std::array<double, 3> &base_joint,
-    const AuxKinectTransform &aux_tf)
+    const AuxKinectTransform &aux_tf,
+    AuxDepthDebugInfo *debug_out = nullptr)
 {
+    if (debug_out != nullptr) {
+        *debug_out = AuxDepthDebugInfo{};
+    }
+
     if (aux_capture == nullptr) {
+        if (debug_out != nullptr) {
+            debug_out->failure_reason = "no_aux_capture";
+        }
         return std::nullopt;
     }
 
     k4a_image_t aux_depth_image = k4a_capture_get_depth_image(aux_capture);
     if (aux_depth_image == nullptr) {
+        if (debug_out != nullptr) {
+            debug_out->failure_reason = "no_aux_depth_image";
+        }
         return std::nullopt;
     }
 
@@ -1785,12 +1809,24 @@ std::optional<AuxDepthSample> sample_aux_depth_point_for_base_joint(
         k4a_image_release);
 
     const auto base_in_aux = transform_base_to_aux(base_joint, aux_tf);
+    if (debug_out != nullptr) {
+        debug_out->predicted_aux_point_3d = base_in_aux;
+    }
     if (base_in_aux[2] <= 0.0) {
+        if (debug_out != nullptr) {
+            debug_out->failure_reason = "base_point_behind_aux";
+        }
         return std::nullopt;
     }
 
     const auto predicted_aux_depth_2d = convert_3d_to_depth_2d(aux_calibration, base_in_aux);
+    if (debug_out != nullptr) {
+        debug_out->predicted_depth_2d = predicted_aux_depth_2d;
+    }
     if (!predicted_aux_depth_2d.has_value()) {
+        if (debug_out != nullptr) {
+            debug_out->failure_reason = "depth_projection_failed";
+        }
         return std::nullopt;
     }
 
@@ -1798,12 +1834,23 @@ std::optional<AuxDepthSample> sample_aux_depth_point_for_base_joint(
     const int depth_height = k4a_image_get_height_pixels(aux_depth_image);
     const int stride_pixels = k4a_image_get_stride_bytes(aux_depth_image) / static_cast<int>(sizeof(uint16_t));
     const auto *depth_buffer = reinterpret_cast<const uint16_t *>(k4a_image_get_buffer(aux_depth_image));
+    if (debug_out != nullptr) {
+        debug_out->depth_width = depth_width;
+        debug_out->depth_height = depth_height;
+    }
     if (depth_buffer == nullptr || depth_width <= 0 || depth_height <= 0 || stride_pixels <= 0) {
+        if (debug_out != nullptr) {
+            debug_out->failure_reason = "invalid_depth_buffer";
+        }
         return std::nullopt;
     }
 
     const int center_x = static_cast<int>(std::llround((*predicted_aux_depth_2d)[0]));
     const int center_y = static_cast<int>(std::llround((*predicted_aux_depth_2d)[1]));
+    if (debug_out != nullptr) {
+        debug_out->center_x = center_x;
+        debug_out->center_y = center_y;
+    }
     constexpr int kSearchRadius = 14;
     constexpr double kMaxAcceptedSpatialErrorMm = 450.0;
 
@@ -1811,6 +1858,8 @@ std::optional<AuxDepthSample> sample_aux_depth_point_for_base_joint(
     int best_x = -1;
     int best_y = -1;
     std::array<double, 3> best_aux_point_3d{};
+    int nonzero_depth_candidates = 0;
+    int valid_3d_candidates = 0;
 
     for (int y = center_y - kSearchRadius; y <= center_y + kSearchRadius; ++y) {
         if (y < 0 || y >= depth_height) {
@@ -1825,6 +1874,7 @@ std::optional<AuxDepthSample> sample_aux_depth_point_for_base_joint(
             if (depth_mm == 0) {
                 continue;
             }
+            ++nonzero_depth_candidates;
 
             k4a_float2_t source_2d{};
             source_2d.xy.x = static_cast<float>(x);
@@ -1842,6 +1892,7 @@ std::optional<AuxDepthSample> sample_aux_depth_point_for_base_joint(
             if (rc != K4A_RESULT_SUCCEEDED || valid == 0) {
                 continue;
             }
+            ++valid_3d_candidates;
 
             const double dx_mm = static_cast<double>(candidate_aux_3d.xyz.x) - base_in_aux[0];
             const double dy_mm = static_cast<double>(candidate_aux_3d.xyz.y) - base_in_aux[1];
@@ -1861,10 +1912,29 @@ std::optional<AuxDepthSample> sample_aux_depth_point_for_base_joint(
         }
     }
 
-    if (best_x < 0 || best_spatial_error > kMaxAcceptedSpatialErrorMm) {
+    if (debug_out != nullptr) {
+        debug_out->nonzero_depth_candidates = nonzero_depth_candidates;
+        debug_out->valid_3d_candidates = valid_3d_candidates;
+        debug_out->best_spatial_error_mm = best_spatial_error;
+    }
+
+    if (best_x < 0) {
+        if (debug_out != nullptr) {
+            debug_out->failure_reason =
+                (nonzero_depth_candidates == 0) ? "no_nonzero_depth_in_window" : "no_valid_3d_candidate";
+        }
+        return std::nullopt;
+    }
+    if (best_spatial_error > kMaxAcceptedSpatialErrorMm) {
+        if (debug_out != nullptr) {
+            debug_out->failure_reason = "best_spatial_error_above_threshold";
+        }
         return std::nullopt;
     }
 
+    if (debug_out != nullptr) {
+        debug_out->failure_reason = "found";
+    }
     return AuxDepthSample{
         base_in_aux,
         best_aux_point_3d,
@@ -2616,8 +2686,9 @@ int main(int argc, char **argv)
             last_aux_predicted_ear_2d = (base_ear_confident && aux_device != nullptr)
                 ? convert_3d_to_depth_2d(aux_calibration, transform_base_to_aux(base_ear->position, aux_tf))
                 : std::nullopt;
+            AuxDepthDebugInfo aux_depth_debug{};
             auto aux_depth_sample = (base_ear_confident && aux_pair_usable_for_fusion)
-                ? sample_aux_depth_point_for_base_joint(aux_calibration, aux_capture, base_ear->position, aux_tf)
+                ? sample_aux_depth_point_for_base_joint(aux_calibration, aux_capture, base_ear->position, aux_tf, &aux_depth_debug)
                 : std::nullopt;
             const bool aux_depth_available = aux_depth_sample.has_value();
             last_aux_tracked_ear_2d = aux_depth_sample.has_value()
@@ -2664,6 +2735,25 @@ int main(int argc, char **argv)
                 if (aux_depth_sample.has_value()) {
                     std::cout << " z_delta=" << ((*fused_ear)[2] - base_ear->position[2])
                               << " aux_match_err_mm=" << aux_depth_sample->spatial_error_mm;
+                } else if (base_ear_confident) {
+                    std::cout << " aux_reason=" << aux_depth_debug.failure_reason;
+                    if (aux_depth_debug.predicted_depth_2d.has_value()) {
+                        std::cout << " aux_pred_uv=(" << (*aux_depth_debug.predicted_depth_2d)[0] << ","
+                                  << (*aux_depth_debug.predicted_depth_2d)[1] << ")";
+                    }
+                    if (aux_depth_debug.center_x >= 0 && aux_depth_debug.center_y >= 0) {
+                        std::cout << " aux_center_uv=(" << aux_depth_debug.center_x << ","
+                                  << aux_depth_debug.center_y << ")";
+                    }
+                    if (aux_depth_debug.depth_width > 0 && aux_depth_debug.depth_height > 0) {
+                        std::cout << " aux_depth_size=" << aux_depth_debug.depth_width << "x"
+                                  << aux_depth_debug.depth_height;
+                    }
+                    std::cout << " aux_nonzero_candidates=" << aux_depth_debug.nonzero_depth_candidates
+                              << " aux_valid_candidates=" << aux_depth_debug.valid_3d_candidates;
+                    if (std::isfinite(aux_depth_debug.best_spatial_error_mm)) {
+                        std::cout << " aux_best_err_mm=" << aux_depth_debug.best_spatial_error_mm;
+                    }
                 }
                 std::cout << '\n';
             }
