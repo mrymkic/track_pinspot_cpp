@@ -176,9 +176,7 @@ struct AppConfig {
     int32_t body_tracking_gpu_device_id = 0;
     std::string body_tracking_model_path = "dnn_model_2_0_op11.onnx";
     std::string tracked_ear = "left";
-    std::array<double, 3> aux_translation_mm{};
-
-    // 補助Kinectの相対位置 [mm]（基準Kinect座標系）
+    // Aux Kinect relative position [mm] in base Kinect coordinates.
     std::array<double, 3> aux_translation_mm{};
     std::array<std::array<double, 3>, 3> aux_rotation_matrix{{
         {{0.0, 0.0, -1.0}},
@@ -2009,6 +2007,9 @@ int main(int argc, char **argv)
         append_runtime_log("Config path: " + config_path.string());
         std::cout << "Current working directory: " << fs::current_path().string() << "\n";
         append_runtime_log("Current working directory: " + fs::current_path().string());
+        const DWORD process_id = GetCurrentProcessId();
+        std::cout << "Process ID: " << process_id << "\n";
+        append_runtime_log("Process ID: " + std::to_string(process_id));
         AppConfig config = load_config(config_path.string());
 
         AuxKinectTransform aux_tf{
