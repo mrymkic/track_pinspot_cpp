@@ -1,0 +1,66 @@
+﻿{
+    "pal_1":  {
+                  "port":  "COM5",
+                  "vc":  [
+                             -700,
+                             -700,
+                             4700
+                         ],
+                  "rotate":  180
+              },
+    "pal_2":  {
+                  "port":  "COM6",
+                  "vc":  [
+                             900,
+                             -500,
+                             4700
+                         ],
+                  "rotate":  180
+              },
+    "pal_3":  {
+                  "port":  "COM7",
+                  "vc":  [
+                             2000,
+                             -500,
+                             4700
+                         ],
+                  "rotate":  180
+              },
+    "update_interval":  0,
+    "pt_factor":  3600,
+    "enable_ptu":  false,
+    "enable_body_tracking":  true,
+    "allow_aux_unsynced_fallback":  false,
+    "body_tracking_mode":  "gpu_cuda",
+    "body_tracking_gpu_device_id":  0,
+    "tracked_ear":  "right",
+    "capture_timeout_ms":  1000,
+    "body_tracking_timeout_ms":  0,
+    "base_kinect_serial":  "",
+    "aux_kinect_serial":  "",
+    "aux_translation_mm":  [
+                               500.0,
+                               0.0,
+                               0.0
+                           ],
+    "rotation_matrix":  [
+                            [
+                                0.0,
+                                0.0,
+                                -1.0
+                            ],
+                            [
+                                0.0,
+                                1.0,
+                                0.0
+                            ],
+                            [
+                                1.0,
+                                0.0,
+                                0.0
+                            ]
+                        ],
+    "subordinate_delay_off_master_usec":  160,
+    "enable_aux_body_tracking":  true
+}
+

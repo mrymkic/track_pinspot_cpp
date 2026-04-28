@@ -167,6 +167,7 @@ struct AppConfig {
     double pt_factor;
     bool enable_ptu = true;
     bool enable_body_tracking = true;
+    bool enable_aux_body_tracking = false;
     bool allow_aux_unsynced_fallback = false;
     int32_t capture_timeout_ms = 1000;
     int32_t body_tracking_timeout_ms = 0;
@@ -393,6 +394,7 @@ AppConfig load_config(const std::string &path)
     cfg.pt_factor = parse_number(text, "pt_factor");
     cfg.enable_ptu = parse_bool_optional(text, "enable_ptu", true);
     cfg.enable_body_tracking = parse_bool_optional(text, "enable_body_tracking", true);
+    cfg.enable_aux_body_tracking = parse_bool_optional(text, "enable_aux_body_tracking", false);
     cfg.allow_aux_unsynced_fallback = parse_bool_optional(text, "allow_aux_unsynced_fallback", false);
     cfg.capture_timeout_ms = static_cast<int32_t>(
         std::llround(parse_number_optional(text, "capture_timeout_ms", 1000.0)));
@@ -2021,6 +2023,7 @@ int main(int argc, char **argv)
         std::cout << "PTU ports : " << config.pal1.port << " " << config.pal2.port << " " << config.pal3.port << '\n';
         std::cout << "PTU enabled: " << (config.enable_ptu ? "true" : "false") << '\n';
         std::cout << "Body tracking enabled: " << (config.enable_body_tracking ? "true" : "false") << '\n';
+        std::cout << "Aux body tracking enabled: " << (config.enable_aux_body_tracking ? "true" : "false") << '\n';
         std::cout << "Body tracking mode: " << config.body_tracking_mode << '\n';
         std::cout << "Body tracking gpu_device_id: " << config.body_tracking_gpu_device_id << '\n';
         std::cout << "Body tracking model asset: " << config.body_tracking_model_path << '\n';
@@ -2155,6 +2158,8 @@ int main(int argc, char **argv)
         k4abt_tracker_t base_tracker = nullptr;
         k4abt_tracker_t aux_tracker = nullptr;
         if (config.enable_body_tracking) {
+            const bool aux_body_tracking_requested =
+                aux_camera_enabled && config.enable_aux_body_tracking;
             std::string base_tracker_mode_in_use;
             if (!create_body_tracker_with_fallback(
                     base_calibration,
@@ -2174,13 +2179,34 @@ int main(int argc, char **argv)
                         "' was unavailable. Using fallback mode '" + base_tracker_mode_in_use + "'.");
                 }
             }
-            if (aux_camera_enabled) {
+            if (aux_body_tracking_requested) {
+                std::string aux_tracker_mode_in_use;
+                if (!create_body_tracker_with_fallback(
+                        aux_calibration,
+                        config.body_tracking_mode,
+                        config.body_tracking_gpu_device_id,
+                        body_tracking_model_path_string,
+                        &aux_tracker,
+                        &aux_tracker_mode_in_use)) {
+                    warn_and_log("Failed to create auxiliary body tracker.");
+                    warn_and_log("Continuing with depth-only correction for the auxiliary Kinect.");
+                    aux_tracker = nullptr;
+                } else {
+                    info_and_log("Aux body tracker created with mode: " + aux_tracker_mode_in_use);
+                    if (aux_tracker_mode_in_use != config.body_tracking_mode) {
+                        warn_and_log(
+                            "Configured body_tracking_mode '" + config.body_tracking_mode +
+                            "' was unavailable for auxiliary tracking. Using fallback mode '" +
+                            aux_tracker_mode_in_use + "'.");
+                    }
+                }
+            } else if (aux_camera_enabled) {
                 std::cout << "Auxiliary Kinect will use depth-only correction (no auxiliary body tracker).\n";
+                append_runtime_log("Auxiliary Kinect will use depth-only correction (no auxiliary body tracker).");
             }
         } else {
             std::cout << "Body tracking disabled by config.\n";
         }
-
         ImageWindow base_image_window;
         ImageWindow aux_image_window;
         bool base_window_initialized = false;
