@@ -1,4 +1,4 @@
-﻿# track_pinspot_cpp
+# track_pinspot_cpp
 
 Azure Kinect 2台を使った同期計測と、`base` 側 body tracking と `aux` 側 depth を組み合わせた座標補正を検証するための C++ プロジェクトです。
 
@@ -14,6 +14,7 @@ Azure Kinect 2台を使った同期計測と、`base` 側 body tracking と `aux
 - アプリ内でも `phase_delta_us` / `phase_error_us` により同期状態を監視できる
 - `base body tracking + aux depth-only` 構成が現実的な方式として成立
 - `gpu_cuda + dnn_model_2_0_lite_op11.onnx` が、現時点で最も安定していた構成
+- `enable_aux_body_tracking` を使うと、2台同時 body tracking を診断モードとして再度有効化できる
 
 ## 背景
 
@@ -155,8 +156,14 @@ Azure Kinect 2台を使った同期計測と、`base` 側 body tracking と `aux
   - CUDA + full model 診断用
 - `track_config_2_bt_cuda_lite.json`
   - CUDA + lite model 診断用
+- `track_config_2_bt_cuda_dual.json`
+  - CUDA + full model で `base + aux` 同時 body tracking を試す診断用
+- `track_config_2_bt_cuda_lite_dual.json`
+  - CUDA + lite model で `base + aux` 同時 body tracking を試す診断用
 - `track_config_2_capture_only.json`
   - body tracking 無効の capture-only 切り分け用
+- `measure_vram_bodytracking.ps1`
+  - `nvidia-smi` ベースの VRAM サンプリング補助スクリプト
 - `CMakeLists.txt`
   - ビルド設定と runtime DLL staging
 
@@ -191,6 +198,65 @@ cmd.exe /c ""C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Too
 - `source=base_xy + aux_depth_z` による補正が安定して働くか
 - `aux_translation_mm` と `rotation_matrix` の精度
 - `sample_aux_depth_point_for_base_joint()` の探索条件の最適化
+
+## VRAM 計測
+
+body tracking 時の GPU メモリ使用量を追うために、次の補助ファイルを追加しています。
+
+- `measure_vram_bodytracking.ps1`
+  - `nvidia-smi` を一定間隔でサンプリングし、CSV に保存する
+- `track_config_2_bt_cuda.json`
+  - `base` のみ、`gpu_cuda + full model`
+- `track_config_2_bt_cuda_lite.json`
+  - `base` のみ、`gpu_cuda + lite model`
+- `track_config_2_bt_cuda_dual.json`
+  - `base + aux` の2台同時 body tracking 診断用、`gpu_cuda + full model`
+- `track_config_2_bt_cuda_lite_dual.json`
+  - `base + aux` の2台同時 body tracking 診断用、`gpu_cuda + lite model`
+
+### 計測例
+
+1台 tracker の既定計測:
+
+```bat
+powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1
+```
+
+2台同時 tracker の lite model 計測:
+
+```bat
+powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -ConfigPath ..\track_config_2_bt_cuda_lite_dual.json -OutputCsv .\build_2cam_x64\vram_samples_dual_lite.csv
+```
+
+2台同時 tracker の full model 計測:
+
+```bat
+powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -ConfigPath ..\track_config_2_bt_cuda_dual.json -OutputCsv .\build_2cam_x64\vram_samples_dual_full.csv
+```
+
+### 見るべき列
+
+- `total_memory_used_mib`
+- `delta_from_baseline_mib`
+- `gpu_util_percent`
+- `memory_util_percent`
+- `target_pid`
+- `target_process_memory_mib`
+
+この PC は WDDM 環境のため、`nvidia-smi` のプロセス別 VRAM が `N/A` や空欄になることがあります。その場合は、まず `delta_from_baseline_mib` を主指標として比較します。
+
+## 変更履歴
+
+重要な変更は、コミット単位で次の表に残します。
+
+| Date | Commit | Summary |
+| --- | --- | --- |
+| 2026-04-28 | `44a4b86` | `enable_aux_body_tracking` を追加し、`gpu_cuda` で2台同時 body tracking を直接測るための dual 診断 config を追加。 |
+| 2026-04-28 | `bfca329` | body tracking 実行時の PID ログと `measure_vram_bodytracking.ps1` を追加し、VRAM サンプリングを自動化。 |
+| 2026-04-28 | `71f35ed` | README と `.gitignore` を整理し、GitHub 上で読みやすい構成に修正。 |
+| 2026-04-28 | `f98dd1f` | 2カメラ同期・body tracking 切り分け内容を含む初回スナップショットを登録。 |
+
+今後も、GitHub に push する大きめの変更はこの表に追記していく想定です。
 
 ## Git 管理メモ
 
