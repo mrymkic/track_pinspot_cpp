@@ -1295,6 +1295,20 @@ std::optional<int64_t> get_capture_depth_timestamp_usec(k4a_capture_t capture)
     return static_cast<int64_t>(k4a_image_get_device_timestamp_usec(depth_image));
 }
 
+std::string format_optional_depth_timestamp_usec(const std::optional<int64_t> &timestamp_usec)
+{
+    return timestamp_usec.has_value() ? std::to_string(*timestamp_usec) : "N/A";
+}
+
+std::string format_optional_success_age_ms(const std::optional<Clock::time_point> &last_success_time)
+{
+    if (!last_success_time.has_value()) {
+        return "N/A";
+    }
+    return std::to_string(
+        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - *last_success_time).count());
+}
+
 class LatestCapturePump {
 public:
     LatestCapturePump() = default;
@@ -1388,6 +1402,31 @@ public:
         return true;
     }
 
+    void get_status(
+        uint64_t *generation_out = nullptr,
+        std::optional<int64_t> *depth_timestamp_out = nullptr,
+        std::optional<Clock::time_point> *last_success_time_out = nullptr,
+        int *consecutive_timeouts_out = nullptr,
+        int *consecutive_failures_out = nullptr) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (generation_out != nullptr) {
+            *generation_out = generation_;
+        }
+        if (depth_timestamp_out != nullptr) {
+            *depth_timestamp_out = last_depth_timestamp_usec_;
+        }
+        if (last_success_time_out != nullptr) {
+            *last_success_time_out = has_success_ ? std::optional<Clock::time_point>(last_success_time_) : std::nullopt;
+        }
+        if (consecutive_timeouts_out != nullptr) {
+            *consecutive_timeouts_out = consecutive_timeouts_;
+        }
+        if (consecutive_failures_out != nullptr) {
+            *consecutive_failures_out = consecutive_failures_;
+        }
+    }
+
 private:
     void run()
     {
@@ -1417,11 +1456,17 @@ private:
             if (wait_result == K4A_WAIT_RESULT_TIMEOUT) {
                 bool should_log_timeout = false;
                 int timeout_count = 0;
+                uint64_t generation_snapshot = 0;
+                std::optional<int64_t> depth_timestamp_snapshot;
+                std::optional<Clock::time_point> last_success_time_snapshot;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     ++consecutive_timeouts_;
                     consecutive_failures_ = 0;
                     timeout_count = consecutive_timeouts_;
+                    generation_snapshot = generation_;
+                    depth_timestamp_snapshot = last_depth_timestamp_usec_;
+                    last_success_time_snapshot = has_success_ ? std::optional<Clock::time_point>(last_success_time_) : std::nullopt;
                     should_log_timeout =
                         has_success_ &&
                         (timeout_count == 5 || timeout_count % 30 == 0);
@@ -1429,29 +1474,40 @@ private:
                 if (should_log_timeout) {
                     warn_and_log(
                         pump_name + " capture pump timed out waiting for a new frame. consecutive_timeouts=" +
-                        std::to_string(timeout_count));
+                        std::to_string(timeout_count) +
+                        " last_generation=" + std::to_string(generation_snapshot) +
+                        " last_depth_ts_us=" + format_optional_depth_timestamp_usec(depth_timestamp_snapshot) +
+                        " last_success_age_ms=" + format_optional_success_age_ms(last_success_time_snapshot));
                 }
                 continue;
             }
             if (wait_result != K4A_WAIT_RESULT_SUCCEEDED || capture == nullptr) {
                 bool should_log_failure = false;
                 int failure_count = 0;
+                uint64_t generation_snapshot = 0;
+                std::optional<int64_t> depth_timestamp_snapshot;
+                std::optional<Clock::time_point> last_success_time_snapshot;
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     consecutive_timeouts_ = 0;
                     ++consecutive_failures_;
                     failure_count = consecutive_failures_;
+                    generation_snapshot = generation_;
+                    depth_timestamp_snapshot = last_depth_timestamp_usec_;
+                    last_success_time_snapshot = has_success_ ? std::optional<Clock::time_point>(last_success_time_) : std::nullopt;
                     should_log_failure = (failure_count == 1 || failure_count % 10 == 0);
                 }
                 if (should_log_failure) {
                     warn_and_log(
                         pump_name + " capture pump received K4A_WAIT_RESULT_FAILED. consecutive_failures=" +
-                        std::to_string(failure_count));
+                        std::to_string(failure_count) +
+                        " last_generation=" + std::to_string(generation_snapshot) +
+                        " last_depth_ts_us=" + format_optional_depth_timestamp_usec(depth_timestamp_snapshot) +
+                        " last_success_age_ms=" + format_optional_success_age_ms(last_success_time_snapshot));
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
-
             const auto depth_timestamp_usec = get_capture_depth_timestamp_usec(capture);
             std::lock_guard<std::mutex> lock(mutex_);
             if (stop_requested_) {
@@ -2290,12 +2346,22 @@ int main(int argc, char **argv)
             k4abt_frame_t aux_body_frame = nullptr;
 
             uint64_t base_capture_generation = 0;
+            uint64_t base_pump_generation = 0;
+            std::optional<int64_t> base_pump_depth_timestamp;
             std::optional<Clock::time_point> base_last_success_time;
+            int base_pump_consecutive_timeouts = 0;
+            int base_pump_consecutive_failures = 0;
+            base_capture_pump.get_status(
+                &base_pump_generation,
+                &base_pump_depth_timestamp,
+                &base_last_success_time,
+                &base_pump_consecutive_timeouts,
+                &base_pump_consecutive_failures);
             const bool base_capture_ok = base_capture_pump.get_latest_capture(
                 &base_capture,
                 &base_capture_generation,
                 nullptr,
-                &base_last_success_time);
+                nullptr);
             bool base_capture_fresh = base_capture_ok && base_capture != nullptr;
             long long base_capture_age_ms = -1;
             if (base_capture_fresh) {
@@ -2309,12 +2375,23 @@ int main(int argc, char **argv)
                     base_capture_fresh = false;
                 }
             }
+            uint64_t aux_capture_generation = 0;
+            uint64_t aux_pump_generation = 0;
+            std::optional<int64_t> aux_pump_depth_timestamp;
             std::optional<Clock::time_point> aux_last_success_time;
+            int aux_pump_consecutive_timeouts = 0;
+            int aux_pump_consecutive_failures = 0;
+            aux_capture_pump.get_status(
+                &aux_pump_generation,
+                &aux_pump_depth_timestamp,
+                &aux_last_success_time,
+                &aux_pump_consecutive_timeouts,
+                &aux_pump_consecutive_failures);
             const bool aux_capture_ok = aux_capture_pump.get_latest_capture(
                 &aux_capture,
+                &aux_capture_generation,
                 nullptr,
-                nullptr,
-                &aux_last_success_time);
+                nullptr);
             std::optional<int64_t> current_sync_raw_delta_us;
             std::optional<int64_t> current_sync_phase_us;
             std::optional<int64_t> current_sync_phase_error_us;
@@ -2395,6 +2472,11 @@ int main(int argc, char **argv)
                     if (base_capture_age_ms >= 0) {
                         message += " last_base_age_ms=" + std::to_string(base_capture_age_ms);
                     }
+                    message += " capture_generation=" + std::to_string(base_capture_generation);
+                    message += " pump_generation=" + std::to_string(base_pump_generation);
+                    message += " pump_last_depth_ts_us=" + format_optional_depth_timestamp_usec(base_pump_depth_timestamp);
+                    message += " pump_timeouts=" + std::to_string(base_pump_consecutive_timeouts);
+                    message += " pump_failures=" + std::to_string(base_pump_consecutive_failures);
                     warn_and_log(message);
                 }
             } else {
@@ -2424,6 +2506,11 @@ int main(int argc, char **argv)
                     if (aux_capture_age_ms >= 0) {
                         message += " last_aux_age_ms=" + std::to_string(aux_capture_age_ms);
                     }
+                    message += " capture_generation=" + std::to_string(aux_capture_generation);
+                    message += " pump_generation=" + std::to_string(aux_pump_generation);
+                    message += " pump_last_depth_ts_us=" + format_optional_depth_timestamp_usec(aux_pump_depth_timestamp);
+                    message += " pump_timeouts=" + std::to_string(aux_pump_consecutive_timeouts);
+                    message += " pump_failures=" + std::to_string(aux_pump_consecutive_failures);
                     warn_and_log(message);
                 }
                 if (!aux_sync_checklist_logged &&
