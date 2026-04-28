@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$ExePath = '.\build_2cam_x64\track_test_cpp_2cam.exe',
     [string]$ConfigPath = '..\track_config_2_bt_cuda_lite.json',
     [string]$OutputCsv = '.\build_2cam_x64\vram_samples.csv',
@@ -8,6 +8,28 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Convert-ToNullableInt {
+    param(
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $trimmed = $Value.Trim()
+    if ($trimmed -eq 'N/A' -or $trimmed -eq '[N/A]') {
+        return $null
+    }
+
+    $parsed = 0
+    if ([int]::TryParse($trimmed, [ref]$parsed)) {
+        return $parsed
+    }
+
+    return $null
+}
 
 function Get-TotalGpuSample {
     $line = & nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu,utilization.memory --format=csv,noheader,nounits 2>$null | Select-Object -First 1
@@ -20,11 +42,16 @@ function Get-TotalGpuSample {
         throw "Unexpected nvidia-smi output: $line"
     }
 
+    $memoryUsed = Convert-ToNullableInt $parts[1]
+    if ($null -eq $memoryUsed) {
+        throw "Failed to parse total GPU memory usage from nvidia-smi: $line"
+    }
+
     [pscustomobject]@{
         Timestamp = $parts[0]
-        MemoryUsedMiB = [int]$parts[1]
-        GpuUtilPercent = [int]$parts[2]
-        MemoryUtilPercent = [int]$parts[3]
+        MemoryUsedMiB = $memoryUsed
+        GpuUtilPercent = Convert-ToNullableInt $parts[2]
+        MemoryUtilPercent = Convert-ToNullableInt $parts[3]
     }
 }
 
@@ -40,10 +67,17 @@ function Get-ComputeProcessSamples {
         if ($parts.Count -lt 3) {
             continue
         }
+
+        $pid = Convert-ToNullableInt $parts[0]
+        if ($null -eq $pid) {
+            continue
+        }
+
         $samples += [pscustomobject]@{
-            Pid = [int]$parts[0]
+            Pid = $pid
             ProcessName = $parts[1]
-            UsedGpuMemoryMiB = [int]$parts[2]
+            UsedGpuMemoryMiB = Convert-ToNullableInt $parts[2]
+            UsedGpuMemoryText = $parts[2]
         }
     }
     return $samples
@@ -79,10 +113,11 @@ try {
             timestamp = $gpu.Timestamp
             total_memory_used_mib = $gpu.MemoryUsedMiB
             delta_from_baseline_mib = $gpu.MemoryUsedMiB - $baseline.MemoryUsedMiB
-            gpu_util_percent = $gpu.GpuUtilPercent
-            memory_util_percent = $gpu.MemoryUtilPercent
+            gpu_util_percent = if ($null -ne $gpu.GpuUtilPercent) { $gpu.GpuUtilPercent } else { '' }
+            memory_util_percent = if ($null -ne $gpu.MemoryUtilPercent) { $gpu.MemoryUtilPercent } else { '' }
             target_pid = if ($proc) { $proc.Id } else { '' }
-            target_process_memory_mib = if ($processEntry) { $processEntry.UsedGpuMemoryMiB } else { '' }
+            target_process_memory_mib = if ($processEntry -and $null -ne $processEntry.UsedGpuMemoryMiB) { $processEntry.UsedGpuMemoryMiB } else { '' }
+            target_process_memory_raw = if ($processEntry) { $processEntry.UsedGpuMemoryText } else { '' }
             target_process_name = if ($processEntry) { $processEntry.ProcessName } else { '' }
         }) | Out-Null
 
@@ -97,6 +132,11 @@ finally {
     $rows | Export-Csv -LiteralPath $OutputCsv -NoTypeInformation -Encoding UTF8
     Write-Host "Saved VRAM samples to: $OutputCsv"
     if ($proc) {
-        Write-Host "Process exited with code: $($proc.ExitCode)"
+        $proc.Refresh()
+        if ($proc.HasExited) {
+            Write-Host "Process exited with code: $($proc.ExitCode)"
+        } else {
+            Write-Host 'Process is still running. Close the app window when you want sampling to end normally.'
+        }
     }
 }
