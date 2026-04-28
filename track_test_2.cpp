@@ -2329,6 +2329,8 @@ int main(int argc, char **argv)
         std::optional<int64_t> sync_phase_baseline_us;
         const int64_t frame_period_usec = camera_fps_to_frame_period_usec(base_config.camera_fps);
         uint64_t last_base_capture_generation_enqueued = 0;
+        uint64_t last_sync_sample_base_generation = 0;
+        uint64_t last_sync_sample_aux_generation = 0;
         bool pending_aux_subordinate_restart = false;
         bool pending_aux_standalone_restart = false;
 
@@ -2396,10 +2398,18 @@ int main(int argc, char **argv)
             std::optional<int64_t> current_sync_phase_us;
             std::optional<int64_t> current_sync_phase_error_us;
             bool aux_pair_usable_for_fusion = aux_capture_ok && aux_capture != nullptr;
-            if (base_capture_fresh && base_capture != nullptr && aux_capture_ok && aux_capture != nullptr) {
+            const bool sync_sample_generations_advanced =
+                base_capture_generation != 0 &&
+                aux_capture_generation != 0 &&
+                base_capture_generation != last_sync_sample_base_generation &&
+                aux_capture_generation != last_sync_sample_aux_generation;
+            if (base_capture_fresh && base_capture != nullptr && aux_capture_ok && aux_capture != nullptr &&
+                sync_sample_generations_advanced) {
                 const auto base_depth_ts = get_capture_depth_timestamp_usec(base_capture);
                 const auto aux_depth_ts = get_capture_depth_timestamp_usec(aux_capture);
                 if (base_depth_ts.has_value() && aux_depth_ts.has_value()) {
+                    last_sync_sample_base_generation = base_capture_generation;
+                    last_sync_sample_aux_generation = aux_capture_generation;
                     current_sync_raw_delta_us = *aux_depth_ts - *base_depth_ts;
                     current_sync_phase_us = normalize_delta_to_frame_phase(
                         *current_sync_raw_delta_us,
