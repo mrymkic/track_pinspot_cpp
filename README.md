@@ -251,6 +251,7 @@ powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -Config
 
 | Date | Commit | Summary |
 | --- | --- | --- |
+| 2026-04-28 | `89fbe9e` | `track_test_2.cpp` に capture pump の generation・最終 depth timestamp・timeout/failure 回数の診断ログを追加し、stream stall の切り分けをしやすくした。 |
 | 2026-04-28 | `561a88f` | `measure_vram_bodytracking.ps1` の `$PID` 予約変数衝突を解消し、WDDM 環境でもサンプリングが途中で落ちないようにした。 |
 | 2026-04-28 | `79e4df3` | `measure_vram_bodytracking.ps1` が WDDM 環境の `[N/A]` を安全に扱えるよう修正し、VRAM CSV 取得を継続できるようにした。 |
 | 2026-04-28 | `44a4b86` | `enable_aux_body_tracking` を追加し、`gpu_cuda` で2台同時 body tracking を直接測るための dual 診断 config を追加。 |
