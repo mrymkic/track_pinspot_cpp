@@ -1,0 +1,41 @@
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# CMake / build outputs
+build/
+build_*/
+build_cpp/
+build_cpp_ninja/
+build_verify/
+build_cmake_check/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Binaries / debug files
+*.obj
+*.o
+*.exe
+*.ilk
+*.lib
+*.exp
+*.pdb
+*.idb
+*.dll
+
+# Runtime logs / recordings
+track_test_2_runtime.log
+*.mkv
+
+# OS / editor noise
+Thumbs.db
+Desktop.ini

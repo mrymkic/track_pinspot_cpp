@@ -1,0 +1,32 @@
+Recommended:
+Run `build_2cam_x64.cmd`
+
+This project uses Ninja + MSVC, so do not build from a plain `cmd.exe`.
+Always enter the x64 Visual Studio developer environment first, or call `VsDevCmd.bat`.
+
+One-shot configure + build for the 2-Kinect target:
+cmd.exe /c ""C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" -arch=amd64 -host_arch=amd64 && "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -S . -B .\build_2cam_x64 -G Ninja && "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build .\build_2cam_x64 --target track_test_cpp_2cam"
+
+Step-by-step:
+1. Open x64 Developer Command Prompt for VS 2022
+   or run:
+   call "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" -arch=amd64 -host_arch=amd64
+
+2. Configure:
+   "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -S . -B .\build_2cam_x64 -G Ninja
+
+3. Build only the 2-Kinect target:
+   "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build .\build_2cam_x64 --target track_test_cpp_2cam
+
+4. Build both targets if needed:
+   "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build .\build_2cam_x64
+
+Notes:
+- `windows.h` not found means the build was started without the Visual Studio / Windows SDK environment.
+- Do not use `cmake.exe . ".\track_pinspot_cpp" -B ...`; that adds an extra source path and causes the warning:
+  `Ignoring extra path from command line`.
+- If you suspect x86/x64 mismatch, use a fresh build directory such as `build_2cam_x64`.
+- You can override SDK paths with `-DK4A_SDK_DIR=...`, `-DK4ABT_SDK_DIR=...`, and `-DK4ABT_ORT_DIR=...`.
+- Targets:
+  `track_test_cpp` = 1 Kinect version
+  `track_test_cpp_2cam` = 2 Kinect version

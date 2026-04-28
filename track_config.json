@@ -1,0 +1,19 @@
+{
+    "pal_1": {
+        "port": "COM5",
+        "vc": [-700, -700, 4700],
+        "rotate": 180
+    },
+    "pal_2": {
+        "port": "COM6",
+        "vc": [900, -500, 4700],
+        "rotate": 180
+    },
+    "pal_3": {
+        "port": "COM7",
+        "vc": [2000, -500, 4700],
+        "rotate": 180
+    },
+    "update_interval": 0,
+    "pt_factor": 3600
+}
