@@ -68,13 +68,13 @@ function Get-ComputeProcessSamples {
             continue
         }
 
-        $pid = Convert-ToNullableInt $parts[0]
-        if ($null -eq $pid) {
+        $processIdValue = Convert-ToNullableInt $parts[0]
+        if ($null -eq $processIdValue) {
             continue
         }
 
         $samples += [pscustomobject]@{
-            Pid = $pid
+            Pid = $processIdValue
             ProcessName = $parts[1]
             UsedGpuMemoryMiB = Convert-ToNullableInt $parts[2]
             UsedGpuMemoryText = $parts[2]
