@@ -1,68 +1,68 @@
-# Checkerboard Calibration Workflow
+# チェッカーボードによるキャリブレーション手順
 
-`calibrate_checkerboard_extrinsics.py` estimates the transform expected by `track_test_2.cpp`:
+`calibrate_checkerboard_extrinsics.py` は、`track_test_2.cpp` が期待している次の変換を推定します。
 
 ```text
 p_base_depth = aux_translation_mm + rotation_matrix * p_aux_depth
 ```
 
-In other words, it outputs the `aux depth -> base depth` transform that should be copied into:
+つまり、このスクリプトは `aux depth -> base depth` の変換を求め、最終的に次の設定値として使える形で出力します。
 
 - `aux_translation_mm`
 - `rotation_matrix`
 
-## Inputs
+## 必要な入力
 
-1. A directory of base-camera checkerboard images.
-2. A directory of aux-camera checkerboard images.
-3. A rig calibration JSON based on `checkerboard_rig_template.json`.
-4. Optionally, a calibration config JSON based on `checkerboard_calibration_config_template.json`.
+1. `base` カメラ側のチェッカーボード画像ディレクトリ
+2. `aux` カメラ側のチェッカーボード画像ディレクトリ
+3. `checkerboard_rig_template.json` を元に作成した rig calibration JSON
+4. 必要に応じて `checkerboard_calibration_config_template.json` を元に作成した calibration config JSON
 
-Image pairs are matched by stem:
+画像ペアはファイル名の `stem` で対応付けます。
 
 ```text
 base/0001.png <-> aux/0001.png
 base/0002.png <-> aux/0002.png
 ```
 
-Here, `stem` means the filename without its extension.
+ここで `stem` は拡張子を除いたファイル名です。
 
 ```text
 base/0001.png -> stem = 0001
 aux/0001.jpg  -> stem = 0001
 ```
 
-So `0001.png` and `0001.jpg` can still be paired, but `base_0001.png` and `aux_0001.png` will not be paired unless the filenames themselves match.
+そのため、`0001.png` と `0001.jpg` はペアになりますが、`base_0001.png` と `aux_0001.png` はファイル名そのものが一致しないためペアになりません。
 
-The rig calibration JSON must contain:
+rig calibration JSON には次の情報が必要です。
 
-- each device's color camera matrix
-- each device's color distortion coefficients
-- either `color_to_depth_*` or `depth_to_color_*`
+- 各デバイスの color camera matrix
+- 各デバイスの color distortion coefficients
+- `color_to_depth_*` または `depth_to_color_*` のどちらか
 
-The script assumes:
+このスクリプトは次の前提で動作します。
 
-- checkerboard detection is done in color images
-- body-tracking / fusion coordinates live in each device's depth coordinate system
+- チェッカーボード検出は color 画像上で行う
+- body tracking / fusion で使う座標系は各デバイスの depth 座標系である
 
-So it first solves the checkerboard pose in color, then converts that pose into depth coordinates before solving the final aux-to-base transform.
+そのため、まず color カメラ座標系でチェッカーボード姿勢を推定し、その結果を depth 座標系に変換してから、最終的な `aux -> base` 変換を求めます。
 
-## Dependencies
+## 依存関係
 
-Use any Python environment that has:
+次の Python パッケージが必要です。
 
 - `numpy`
 - `opencv-python`
 
-Example:
+例:
 
 ```bat
 python -m pip install numpy opencv-python
 ```
 
-## Example
+## 実行例
 
-### Command-line only
+### コマンドライン引数だけで実行する場合
 
 ```bat
 python .\tools\calibrate_checkerboard_extrinsics.py ^
@@ -77,39 +77,39 @@ python .\tools\calibrate_checkerboard_extrinsics.py ^
   --config-out .\track_config_2_checkerboard.json
 ```
 
-### Using a calibration config JSON
+### calibration config JSON を使う場合
 
-Edit `checkerboard_calibration_config_template.json`, then run:
+`checkerboard_calibration_config_template.json` を編集してから、次のように実行します。
 
 ```bat
 python .\tools\calibrate_checkerboard_extrinsics.py ^
   --calibration-config .\tools\checkerboard_calibration_config_template.json
 ```
 
-The config can hold:
+この config には次の内容をまとめて書けます。
 
-- image directories
-- rig calibration JSON path
-- checkerboard `board_cols`, `board_rows`, `square_size_mm`
-- optional output report path
-- optional input/output tracking config paths
+- 画像ディレクトリのパス
+- rig calibration JSON のパス
+- チェッカーボードの `board_cols`, `board_rows`, `square_size_mm`
+- 任意のレポート出力先
+- 任意の入出力 tracking config パス
 
-CLI flags still work and override the JSON values when both are provided.
+CLI 引数と config JSON の両方に同じ項目がある場合は、CLI 引数の値が優先されます。
 
-## Outputs
+## 出力
 
-The script prints:
+スクリプトは次の情報を表示します。
 
-- the estimated `aux_translation_mm`
-- the estimated `rotation_matrix`
-- mean reprojection errors
-- per-pair translation / rotation diagnostics
+- 推定した `aux_translation_mm`
+- 推定した `rotation_matrix`
+- 平均再投影誤差
+- 各画像ペアごとの平行移動 / 回転の診断情報
 
-If `--config-in` and `--config-out` are provided, it also writes a patched tracking config JSON that can be copied into normal runtime use.
+`--config-in` と `--config-out` を指定した場合は、通常の実行で使えるように `aux_translation_mm` と `rotation_matrix` を反映した tracking config JSON もあわせて出力します。
 
-## Practical Notes
+## 実運用上の注意
 
-- Use multiple checkerboard poses and distances, not a single frame.
-- Keep the whole checkerboard visible in both images.
-- Remove poor frames if reprojection error is obviously worse than the rest.
-- The current repo still treats `aux_translation_mm` / `rotation_matrix` as calibration values under active refinement, so validate the result with real body-tracking logs after patching the config.
+- 1枚だけで済ませず、距離や角度を変えた複数のチェッカーボード姿勢で撮影してください
+- どちらの画像でもチェッカーボード全体が見えるようにしてください
+- 再投影誤差が明らかに悪いフレームは除外してください
+- このリポジトリでは `aux_translation_mm` / `rotation_matrix` をまだ調整中の値として扱っているため、config 反映後も実際の body-tracking ログで妥当性を確認してください
