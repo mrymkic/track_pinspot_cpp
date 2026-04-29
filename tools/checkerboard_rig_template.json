@@ -1,0 +1,32 @@
+{
+    "_note": "Populate this file with Azure Kinect calibration values before running calibrate_checkerboard_extrinsics.py.",
+    "_note_transform": "Use color_to_depth_* if you already have that transform. Otherwise provide depth_to_color_* and the script will invert it.",
+    "base": {
+        "color_camera_matrix": [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ],
+        "color_distortion_coeffs": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "color_to_depth_rotation": [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ],
+        "color_to_depth_translation_mm": [0.0, 0.0, 0.0]
+    },
+    "aux": {
+        "color_camera_matrix": [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ],
+        "color_distortion_coeffs": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "color_to_depth_rotation": [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0]
+        ],
+        "color_to_depth_translation_mm": [0.0, 0.0, 0.0]
+    }
+}

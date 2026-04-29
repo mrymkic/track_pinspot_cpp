@@ -43,6 +43,10 @@ compile_commands.json
 track_test_2_runtime.log
 *.mkv
 
+# Python cache
+__pycache__/
+*.pyc
+
 # OS noise
 Thumbs.db
 Desktop.ini
