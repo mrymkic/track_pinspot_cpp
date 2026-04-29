@@ -109,7 +109,7 @@ python .\tools\calibrate_checkerboard_extrinsics.py ^
   --square-size-mm 25 ^
   --output-json .\calibration_images\SESSION_NAME\checkerboard_result.json ^
   --config-in .\track_config_2.json ^
-  --config-out .\track_config_2_checkerboard.json
+  --config-out .\track_config_2.json
 ```
 
 ### calibration config JSON を使う場合
@@ -131,6 +131,8 @@ python .\tools\calibrate_checkerboard_extrinsics.py ^
 
 CLI 引数と config JSON の両方に同じ項目がある場合は、CLI 引数の値が優先されます。
 
+`track_test_cpp_2cam.exe` がデフォルトで読む `track_config_2.json` をそのまま更新したい場合は、`config_in` と `config_out` の両方を同じ `track_config_2.json` にしてください。このテンプレートはその設定にしてあります。
+
 ## 出力
 
 スクリプトは次の情報を表示します。
@@ -140,7 +142,7 @@ CLI 引数と config JSON の両方に同じ項目がある場合は、CLI 引�
 - 平均再投影誤差
 - 各画像ペアごとの平行移動 / 回転の診断情報
 
-`--config-in` と `--config-out` を指定した場合は、通常の実行で使えるように `aux_translation_mm` と `rotation_matrix` を反映した tracking config JSON もあわせて出力します。
+`--config-in` と `--config-out` を指定した場合は、通常の実行で使えるように `aux_translation_mm` と `rotation_matrix` を反映した tracking config JSON もあわせて出力します。`config_out` を `track_config_2.json` にしておけば、そのまま次回の `track_test_cpp_2cam.exe` 実行から新しい外部パラメータが使われます。
 
 ## 実運用上の注意
 

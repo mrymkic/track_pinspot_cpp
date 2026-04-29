@@ -2,15 +2,16 @@
     "_note": "Copy this file and edit the paths and checkerboard values before running calibrate_checkerboard_extrinsics.py.",
     "_note_capture": "If you used track_config_2_capture_images.json, point base_dir and aux_dir at calibration_images/<session>/base and calibration_images/<session>/aux_color.",
     "_note_paths": "Relative paths are resolved from this JSON file's directory.",
-    "base_dir": "../calibration_images/session_name/base",
-    "aux_dir": "../calibration_images/session_name/aux_color",
+    "_note_config": "Set config_in and config_out to the same file if you want to overwrite the config used by track_test_cpp_2cam directly.",
+    "base_dir": "../calibration_images/20260429_160911_337/base",
+    "aux_dir": "../calibration_images/20260429_160911_337/aux_color",
     "rig_calibration": "./checkerboard_rig_template.json",
     "checkerboard": {
         "board_cols": 9,
         "board_rows": 6,
         "square_size_mm": 32.0
     },
-    "output_json": "../calibration_images/session_name/checkerboard_result.json",
+    "output_json": "../calibration_images/20260429_160911_337/checkerboard_result.json",
     "config_in": "../track_config_2.json",
-    "config_out": "../track_config_2_checkerboard.json"
+    "config_out": "../track_config_2.json"
 }
