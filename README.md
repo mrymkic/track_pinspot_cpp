@@ -1,20 +1,22 @@
 # track_pinspot_cpp
 
-Azure Kinect 2台を使った同期計測と、`base` 側 body tracking と `aux` 側 depth を組み合わせた座標補正を検証するための C++ プロジェクトです。
+Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body tracking を動かしながら座標補正を検証するための C++ プロジェクトです。
 
-現時点の主方針は、2台同時 body tracking ではなく、次の構成です。
+現時点の主方針は、次の構成です。
 
 - `base`: body tracking を実行する主センサ
-- `aux`: 有線同期された補助センサ。body tracking は行わず depth のみを利用
+- `aux`: 有線同期された補助センサ。`enable_aux_body_tracking=true` のとき body tracking も実行
 - 最終融合: `base` の `x, y` と `aux` 由来の `z` を組み合わせる
+- `aux` の骨格が取れたときは `base_xy + aux_body_z` を優先し、取れないときは `base_xy + aux_depth_z` へフォールバックする
 
 ## 現在の到達点
 
 - Azure Kinect 2台の `MASTER / SUBORDINATE` 有線同期は確認済み
 - アプリ内でも `phase_delta_us` / `phase_error_us` により同期状態を監視できる
-- `base body tracking + aux depth-only` 構成が現実的な方式として成立
+- `enable_aux_body_tracking` により 2台同時 body tracking を常用構成として有効化
+- `aux` tracker も新しい capture 世代だけ enqueue するようにし、同一フレームの詰まりを避ける
 - `gpu_cuda + dnn_model_2_0_lite_op11.onnx` が、現時点で最も安定していた構成
-- `enable_aux_body_tracking` を使うと、2台同時 body tracking を診断モードとして再度有効化できる
+- `aux` 側の骨格が取れない場面では、従来どおり depth ベース補正へフォールバックできる
 
 ## 背景
 
@@ -26,12 +28,19 @@ Azure Kinect 2台を使った同期計測と、`base` 側 body tracking と `aux
 - 2台同期 capture はできても、GPU body tracking の負荷下で `aux` の更新が止まりやすい
 - 特に `gpu_directml` や `gpu_cuda + full model` では、`aux capture stopped updating` が出やすかった
 
-そのため現在は、2台同時 body tracking ではなく、
+そのため一時期は、
 
 - `base`: body tracking
 - `aux`: depth-only
 
-という役割分担に切り替えています。
+という役割分担に切り替えていました。
+
+現在は `enable_aux_body_tracking` を有効にしたとき、`aux` 側 tracker も常時進めつつ、
+
+- `aux` 骨格あり: `base_xy + aux_body_z`
+- `aux` 骨格なし: `base_xy + aux_depth_z`
+
+の順で使い分ける構成に戻しています。
 
 ## 同期について
 
@@ -183,8 +192,9 @@ cmd.exe /c ""C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Too
 - model: `dnn_model_2_0_lite_op11.onnx`
 - `base`: `MASTER`
 - `aux`: `SUBORDINATE`
-- `aux` は depth-only 用途
-- ただし同期維持のため、`aux` の color は内部的には有効
+- `enable_aux_body_tracking = true`
+- `aux` 骨格が不安定な場面では depth 補正へフォールバック
+- 同期維持のため、`aux` の color は内部的には有効
 
 ## 既知の注意点
 
@@ -258,6 +268,7 @@ powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -Config
 | 2026-04-28 | `79e4df3` | `measure_vram_bodytracking.ps1` が WDDM 環境の `[N/A]` を安全に扱えるよう修正し、VRAM CSV 取得を継続できるようにした。 |
 | 2026-04-28 | `44a4b86` | `enable_aux_body_tracking` を追加し、`gpu_cuda` で2台同時 body tracking を直接測るための dual 診断 config を追加。 |
 | 2026-04-28 | `bfca329` | body tracking 実行時の PID ログと `measure_vram_bodytracking.ps1` を追加し、VRAM サンプリングを自動化。 |
+| 2026-04-29 | `working tree` | `aux` tracker も capture generation 単位で進めるよう修正し、`base_xy + aux_body_z` を優先する 2台同時 body tracking を既定構成へ反映。 |
 | 2026-04-28 | `71f35ed` | README と `.gitignore` を整理し、GitHub 上で読みやすい構成に修正。 |
 | 2026-04-28 | `f98dd1f` | 2カメラ同期・body tracking 切り分け内容を含む初回スナップショットを登録。 |
 

@@ -1557,6 +1557,7 @@ private:
 
 bool create_body_tracker_with_fallback(
     const k4a_calibration_t &calibration,
+    const std::string &tracker_label,
     const std::string &requested_mode,
     int32_t requested_gpu_device_id,
     const std::string &model_path,
@@ -1580,11 +1581,11 @@ bool create_body_tracker_with_fallback(
 
         if (i == 0) {
             info_and_log(
-                "Attempting base body tracker with mode: " + mode +
+                "Attempting " + tracker_label + " body tracker with mode: " + mode +
                 ", gpu_device_id=" + std::to_string(requested_gpu_device_id));
         } else {
             warn_and_log(
-                "Retrying base body tracker with fallback mode: " + mode +
+                "Retrying " + tracker_label + " body tracker with fallback mode: " + mode +
                 ", gpu_device_id=" + std::to_string(requested_gpu_device_id));
         }
 
@@ -1593,7 +1594,7 @@ bool create_body_tracker_with_fallback(
             return true;
         }
 
-        warn_and_log("Base body tracker creation failed with mode: " + mode);
+        warn_and_log(tracker_label + " body tracker creation failed with mode: " + mode);
     }
 
     return false;
@@ -1965,36 +1966,6 @@ bool get_capture_only(
     return true;
 }
 
-bool get_body_frame_for_capture(
-    k4abt_tracker_t tracker,
-    k4a_capture_t capture,
-    int32_t body_tracking_timeout_ms,
-    k4abt_frame_t *body_frame_out)
-{
-    *body_frame_out = nullptr;
-
-    if (tracker == nullptr) {
-        return true;
-    }
-
-    if (capture == nullptr) {
-        return false;
-    }
-
-    (void)body_tracking_timeout_ms;
-    constexpr int32_t kTrackerPollTimeoutMs = 0;
-
-    if (k4abt_tracker_enqueue_capture(tracker, capture, kTrackerPollTimeoutMs) != K4A_WAIT_RESULT_SUCCEEDED) {
-        return true;
-    }
-
-    if (k4abt_tracker_pop_result(tracker, body_frame_out, kTrackerPollTimeoutMs) != K4A_WAIT_RESULT_SUCCEEDED) {
-        return true;
-    }
-
-    return true;
-}
-
 bool advance_body_tracker_for_latest_capture(
     k4abt_tracker_t tracker,
     k4a_capture_t capture,
@@ -2289,6 +2260,7 @@ int main(int argc, char **argv)
             std::string base_tracker_mode_in_use;
             if (!create_body_tracker_with_fallback(
                     base_calibration,
+                    "base",
                     config.body_tracking_mode,
                     config.body_tracking_gpu_device_id,
                     body_tracking_model_path_string,
@@ -2309,6 +2281,7 @@ int main(int argc, char **argv)
                 std::string aux_tracker_mode_in_use;
                 if (!create_body_tracker_with_fallback(
                         aux_calibration,
+                        "auxiliary",
                         config.body_tracking_mode,
                         config.body_tracking_gpu_device_id,
                         body_tracking_model_path_string,
@@ -2399,6 +2372,7 @@ int main(int argc, char **argv)
         std::optional<int64_t> sync_phase_baseline_us;
         const int64_t frame_period_usec = camera_fps_to_frame_period_usec(base_config.camera_fps);
         uint64_t last_base_capture_generation_enqueued = 0;
+        uint64_t last_aux_capture_generation_enqueued = 0;
         uint64_t last_sync_sample_base_generation = 0;
         uint64_t last_sync_sample_aux_generation = 0;
         bool pending_aux_subordinate_restart = false;
@@ -2538,10 +2512,11 @@ int main(int argc, char **argv)
                 base_capture_generation,
                 &last_base_capture_generation_enqueued,
                 &base_body_frame);
-            (void)get_body_frame_for_capture(
+            const bool aux_body_frame_ok = advance_body_tracker_for_latest_capture(
                 aux_tracker,
                 aux_capture,
-                config.body_tracking_timeout_ms,
+                aux_capture_generation,
+                &last_aux_capture_generation_enqueued,
                 &aux_body_frame);
 
             if (!base_capture_fresh) {
@@ -2683,6 +2658,16 @@ int main(int argc, char **argv)
                 ? get_tracked_ear_3d_from_body_frame(base_body_frame, config.tracked_ear)
                 : std::nullopt;
             const bool base_ear_confident = base_ear.has_value() && is_confident_joint(base_ear->confidence_level);
+            auto aux_ear = (aux_capture_fresh && aux_body_frame_ok && aux_body_frame != nullptr)
+                ? get_tracked_ear_3d_from_body_frame(aux_body_frame, config.tracked_ear)
+                : std::nullopt;
+            const bool aux_ear_confident = aux_ear.has_value() && is_confident_joint(aux_ear->confidence_level);
+            auto aux_body_ear_in_base = aux_ear_confident
+                ? std::optional<std::array<double, 3>>(transform_aux_to_base(aux_ear->position, aux_tf))
+                : std::nullopt;
+            auto aux_body_ear_2d = aux_ear_confident
+                ? convert_3d_to_depth_2d(aux_calibration, aux_ear->position)
+                : std::nullopt;
             last_aux_predicted_ear_2d = (base_ear_confident && aux_device != nullptr)
                 ? convert_3d_to_depth_2d(aux_calibration, transform_base_to_aux(base_ear->position, aux_tf))
                 : std::nullopt;
@@ -2691,13 +2676,19 @@ int main(int argc, char **argv)
                 ? sample_aux_depth_point_for_base_joint(aux_calibration, aux_capture, base_ear->position, aux_tf, &aux_depth_debug)
                 : std::nullopt;
             const bool aux_depth_available = aux_depth_sample.has_value();
-            last_aux_tracked_ear_2d = aux_depth_sample.has_value()
-                ? std::optional<std::array<float, 2>>(aux_depth_sample->sampled_depth_2d)
-                : std::nullopt;
+            last_aux_tracked_ear_2d = std::nullopt;
+            if (aux_body_ear_2d.has_value()) {
+                last_aux_tracked_ear_2d = aux_body_ear_2d;
+            } else if (aux_depth_sample.has_value()) {
+                last_aux_tracked_ear_2d = aux_depth_sample->sampled_depth_2d;
+            }
 
             std::optional<std::array<double, 3>> fused_ear;
             std::string fused_ear_source;
-            if (base_ear_confident && aux_depth_available) {
+            if (base_ear_confident && aux_body_ear_in_base.has_value()) {
+                fused_ear = fuse_two_points(base_ear->position, *aux_body_ear_in_base);
+                fused_ear_source = "base_xy + aux_body_z";
+            } else if (base_ear_confident && aux_depth_available) {
                 const auto aux_in_base = transform_aux_to_base(aux_depth_sample->sampled_aux_point_3d, aux_tf);
                 fused_ear = fuse_two_points(base_ear->position, aux_in_base);
                 fused_ear_source = "base_xy + aux_depth_z";
@@ -2729,10 +2720,15 @@ int main(int argc, char **argv)
                           << (*fused_ear)[2]
                           << " | base_z=" << (base_ear.has_value() ? base_ear->position[2] : 0.0)
                           << " | base_conf=" << (base_ear.has_value() ? joint_confidence_to_string(base_ear->confidence_level) : "MISSING")
+                          << " aux_body=" << (aux_ear_confident ? "FOUND" : "MISSING")
+                          << " aux_body_conf=" << (aux_ear.has_value() ? joint_confidence_to_string(aux_ear->confidence_level) : "MISSING")
                           << " aux_depth=" << (aux_depth_available ? "FOUND" : "MISSING")
                           << " aux_mode=" << (aux_camera_enabled ? wired_sync_mode_to_string(aux_config.wired_sync_mode) : "disabled")
                           << " source=" << fused_ear_source;
-                if (aux_depth_sample.has_value()) {
+                if (aux_body_ear_in_base.has_value() && fused_ear_source == "base_xy + aux_body_z") {
+                    std::cout << " z_delta=" << ((*fused_ear)[2] - base_ear->position[2])
+                              << " aux_body_z=" << (*aux_body_ear_in_base)[2];
+                } else if (aux_depth_sample.has_value()) {
                     std::cout << " z_delta=" << ((*fused_ear)[2] - base_ear->position[2])
                               << " aux_match_err_mm=" << aux_depth_sample->spatial_error_mm;
                 } else if (base_ear_confident) {
