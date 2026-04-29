@@ -13,10 +13,13 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 
 - Azure Kinect 2台の `MASTER / SUBORDINATE` 有線同期は確認済み
 - アプリ内でも `phase_delta_us` / `phase_error_us` により同期状態を監視できる
-- `enable_aux_body_tracking` により 2台同時 body tracking を常用構成として有効化
+- `enable_aux_body_tracking` により `base` / `aux` の 2台同時 body tracking を有効化
+- 最新の確認では、`Base body tracker created ...` / `Aux body tracker created ...` の後も同期ログが継続し、以前の `aux capture stopped updating` は再現していない
 - `aux` tracker も新しい capture 世代だけ enqueue するようにし、同一フレームの詰まりを避ける
+- `aux` capture stall 時には、aux カメラ再起動と aux tracker 再生成を試みる
 - `gpu_cuda + dnn_model_2_0_lite_op11.onnx` が、現時点で最も安定していた構成
 - `aux` 側の骨格が取れない場面では、従来どおり depth ベース補正へフォールバックできる
+- ただし `aux_translation_mm` と `rotation_matrix` はまだダミー値であり、融合後の空間精度は未検証
 
 ## 背景
 
@@ -35,12 +38,19 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 
 という役割分担に切り替えていました。
 
-現在は `enable_aux_body_tracking` を有効にしたとき、`aux` 側 tracker も常時進めつつ、
+その後、
+
+- `aux` tracker も `base` と同様に capture generation 単位で進める
+- stall 時は `aux` カメラ再起動後に `aux` tracker も作り直す
+
+ように修正し、現在は `enable_aux_body_tracking` を有効にしたとき、
 
 - `aux` 骨格あり: `base_xy + aux_body_z`
 - `aux` 骨格なし: `base_xy + aux_depth_z`
 
 の順で使い分ける構成に戻しています。
+
+つまり現状は、「2台同時に body tracking を動かすところまではできているが、融合用の外部パラメータはまだ仮」という段階です。
 
 ## 同期について
 
@@ -77,7 +87,7 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 
 と見えても、30fps の周期 `33333us` で折りたたむと、どれもほぼ同じ位相として扱えます。
 
-## なぜ2台同時 body tracking を採用していないか
+## 2台同時 body tracking の現状
 
 このプロジェクトでは何度か方針を切り替えています。
 
@@ -86,18 +96,25 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 - `track_test.cpp`
 - 単体の Azure Kinect で body tracking を行う版
 
-### 2. 2台同時 body tracking の試行
+### 2. 初期の 2台同時 body tracking の試行
 
 - `track_test_2.cpp` をベースに 2 台同時 tracking を試行
 - しかし `aux` 側 tracker 作成と継続動作が不安定
 
-### 3. `base body tracking + aux depth-only` へ移行
+### 3. 一時的に `base body tracking + aux depth-only` へ移行
 
 - `base` が人物の関節を検出
 - `aux` は body tracking をせず、投影先近傍の depth を取得
 - `aux` の depth から `z` 成分だけを補正
 
 この方式なら、2台同時 body tracking より負荷と不安定要因を減らしつつ、奥行き補正の恩恵を受けられます。
+
+### 4. 現在
+
+- `base` と `aux` の tracker は並行稼働できている
+- `aux` 骨格が取れたときは `base_xy + aux_body_z` を使う
+- `aux` 骨格が取れないときは `base_xy + aux_depth_z` へフォールバックする
+- 融合用の `aux_translation_mm` / `rotation_matrix` はまだダミーのため、座標精度の評価はこれから
 
 ## body tracking モードの切り分け結果
 
@@ -124,30 +141,38 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 処理の流れは次の通りです。
 
 1. `base` で対象関節の 3D 座標を取得する
-2. その 3D 座標を `aux` 座標系へ変換する
-3. `aux` depth image 上へ投影する
-4. 投影先近傍の depth 候補を探索し、3D に復元する
-5. 予測位置に最も近い `aux` 由来 3D 点を採用する
-6. その点を `base` 座標系へ戻す
-7. 最終的に `fused = { base.x, base.y, aux由来z }` を作る
+2. `aux` tracker に同じ関節があれば、その 3D 座標を `base` 座標系へ変換する
+3. `aux` 骨格が取れたときは `fused = { base.x, base.y, aux_body由来z }` を作る
+4. `aux` 骨格が取れないときは、`base` の 3D 座標を `aux` 座標系へ変換する
+5. それを `aux` depth image 上へ投影し、投影先近傍の depth 候補を探索して 3D に復元する
+6. 予測位置に最も近い `aux` 由来 3D 点を `base` 座標系へ戻し、`fused = { base.x, base.y, aux_depth由来z }` を作る
+7. どちらも使えないときは `base_only` として `base` 単独値を使う
 
-ログではこの融合元を `source=base_xy + aux_depth_z` と表現しています。
+ログでは融合元を次のように表現しています。
+
+- `source=base_xy + aux_body_z`
+- `source=base_xy + aux_depth_z`
+- `source=base_only`
+
+なお、現状は追従対象を耳位置に絞っており、全関節を対等に融合しているわけではありません。
 
 ## この方式でできること / できないこと
 
 ### できること
 
-- 耳や頭部など、特定点の奥行き補正
-- `base` 単独より安定した `z` 推定
-- `base` を主とした軽量な2台融合
+- `base` / `aux` の 2台同時 body tracking を並行稼働させること
+- `aux` 骨格が取れたときに `aux_body_z` を使うこと
+- `aux` 骨格が取れないときも `aux_depth_z` へフォールバックして処理継続すること
+- 耳や頭部など、特定点の `z` 補正を試すこと
 
 ### できないこと
 
-- `aux` 単独で関節を再認識すること
-- 2台の骨格を完全に対等に融合すること
-- `base` が見失った関節を `aux` だけで復元すること
+- 現時点で信頼できる融合座標を得ること
+- 2台の骨格を完全に対等な重みで融合すること
+- 全関節について校正済みの 2台融合を行うこと
+- `base` が見失った関節を `aux` だけで確実に復元すること
 
-つまり、`aux` は独立した認識器ではなく、`base` の補助 depth センサとして使っています。
+つまり現状の `aux` は、「並行して body tracking も動かす補助センサ」ではあるものの、座標融合の精度面はこれから詰める段階です。
 
 ## 主要ファイル
 
@@ -194,20 +219,24 @@ cmd.exe /c ""C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Too
 - `aux`: `SUBORDINATE`
 - `enable_aux_body_tracking = true`
 - `aux` 骨格が不安定な場面では depth 補正へフォールバック
+- `aux_translation_mm` / `rotation_matrix` は仮値として扱う
 - 同期維持のため、`aux` の color は内部的には有効
 
 ## 既知の注意点
 
 - `CUDA provider probe failed ... error 1114` が出ても、その後に `Base body tracker created with mode: gpu_cuda` が出る場合は実運用上 tracker 作成に成功している
 - `subordinate_delay_off_master_usec = 160` は subordinate の color capture タイミング設定であり、ログ上の `phase_delta_us` と 1:1 に一致する値ではない
-- 安定動作していても、最終的には `aux_depth=FOUND` が安定して出るかどうかを別途確認する必要がある
+- `raw_delta_us` はフレーム周期の整数倍だけずれて見えることがあるので、同期確認では `phase_delta_us` / `phase_error_us` を優先して見る
+- 融合用の `aux_translation_mm` / `rotation_matrix` はまだダミーであり、`source=base_xy + aux_body_z` や `source=base_xy + aux_depth_z` が出ていても、その座標精度までは保証していない
+- `aux` stream stall 時は再起動と tracker 再生成を試みるが、USB や電源条件が悪いと再起動に失敗する可能性は残る
 
 ## 今後の確認事項
 
-- 実人物を入れた状態で `aux_depth=FOUND` が安定するか
-- `source=base_xy + aux_depth_z` による補正が安定して働くか
-- `aux_translation_mm` と `rotation_matrix` の精度
+- 実人物を入れた状態で `aux_body=FOUND` と `source=base_xy + aux_body_z` が安定して出るか
+- `aux_body_z` と `aux_depth_z` のどちらが実運用で安定するか
+- `aux_translation_mm` と `rotation_matrix` を実測値に置き換えたときの精度
 - `sample_aux_depth_point_for_base_joint()` の探索条件の最適化
+- 長時間運転時の `aux` 再起動経路の安定性
 
 ## VRAM 計測
 
@@ -261,6 +290,8 @@ powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -Config
 
 | Date | Commit | Summary |
 | --- | --- | --- |
+| 2026-04-29 | `209fb32` | `aux` capture stall 後の再起動で、serial 再解決・カメラ再初期化・aux tracker 再生成まで行うよう修正。 |
+| 2026-04-29 | `3dca973` | `aux` tracker も capture generation 単位で進めるよう修正し、`base_xy + aux_body_z` を優先する 2台同時 body tracking を既定構成へ反映。 |
 | 2026-04-28 | `1105d31` | `aux_depth=MISSING` 時に、投影失敗・探索窓内の depth 欠損・3D 候補不足・空間誤差超過などの理由をログへ出す診断を追加。 |
 | 2026-04-28 | `51bc322` | sync baseline / phase 診断が同じ stale な aux frame を繰り返し使わないようにし、新しい base / aux frame pair のときだけ学習・判定するよう修正。 |
 | 2026-04-28 | `89fbe9e` | `track_test_2.cpp` に capture pump の generation・最終 depth timestamp・timeout/failure 回数の診断ログを追加し、stream stall の切り分けをしやすくした。 |
@@ -268,7 +299,6 @@ powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -Config
 | 2026-04-28 | `79e4df3` | `measure_vram_bodytracking.ps1` が WDDM 環境の `[N/A]` を安全に扱えるよう修正し、VRAM CSV 取得を継続できるようにした。 |
 | 2026-04-28 | `44a4b86` | `enable_aux_body_tracking` を追加し、`gpu_cuda` で2台同時 body tracking を直接測るための dual 診断 config を追加。 |
 | 2026-04-28 | `bfca329` | body tracking 実行時の PID ログと `measure_vram_bodytracking.ps1` を追加し、VRAM サンプリングを自動化。 |
-| 2026-04-29 | `working tree` | `aux` tracker も capture generation 単位で進めるよう修正し、`base_xy + aux_body_z` を優先する 2台同時 body tracking を既定構成へ反映。 |
 | 2026-04-28 | `71f35ed` | README と `.gitignore` を整理し、GitHub 上で読みやすい構成に修正。 |
 | 2026-04-28 | `f98dd1f` | 2カメラ同期・body tracking 切り分け内容を含む初回スナップショットを登録。 |
 
