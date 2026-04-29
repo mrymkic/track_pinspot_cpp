@@ -235,11 +235,13 @@ cmd.exe /c ""C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Too
 
 起動後にチェッカーボードを `base` / `aux` の両方に見せ、`c` キーを押すと現在の画像ペアを保存します。
 
+Windows では `aux` が予約名なので、補助カメラ側の保存フォルダ名は `aux_color` です。
+
 - `base`: `calibration_images/<session>/base/0001.bmp`
-- `aux`: `calibration_images/<session>/aux/0001.jpg`
+- `aux`: `calibration_images/<session>/aux_color/0001.jpg`
 - 必要なら `capture_save_aux_depth = true` で `aux_depth` も保存可能
 
-`<session>` には実行時刻ベースのセッション名が付きます。保存された `base` と `aux` のディレクトリは、そのまま `tools/calibrate_checkerboard_extrinsics.py` の入力に使えます。
+`<session>` には実行時刻ベースのセッション名が付きます。保存された `base` と `aux_color` のディレクトリは、そのまま `tools/calibrate_checkerboard_extrinsics.py` の入力に使えます。
 
 例:
 

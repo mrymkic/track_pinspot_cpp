@@ -720,7 +720,8 @@ ImageCaptureSession create_image_capture_session(
     const fs::path output_root = resolve_output_path(config.capture_output_dir, config_path);
     session.session_dir = output_root / make_capture_session_name();
     session.base_dir = session.session_dir / "base";
-    session.aux_dir = session.session_dir / "aux";
+    // `aux` is a reserved DOS device name on Windows, so use `aux_color`.
+    session.aux_dir = session.session_dir / "aux_color";
     session.aux_depth_dir = session.session_dir / "aux_depth";
     session.save_aux_depth = config.capture_save_aux_depth;
 

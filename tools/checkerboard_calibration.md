@@ -76,12 +76,14 @@ calibration_images/
     base/
       0001.bmp
       0002.bmp
-    aux/
+    aux_color/
       0001.jpg
       0002.jpg
 ```
 
-この `base` と `aux` のディレクトリを、そのまま `calibrate_checkerboard_extrinsics.py` の `--base-dir` / `--aux-dir` に渡せます。
+Windows では `aux` が予約名なので、補助カメラ側の保存フォルダ名は `aux_color` にしています。
+
+この `base` と `aux_color` のディレクトリを、そのまま `calibrate_checkerboard_extrinsics.py` の `--base-dir` / `--aux-dir` に渡せます。
 
 `track_config_2_capture_images.json` では、次の設定をあらかじめ有効にしています。
 
@@ -99,7 +101,7 @@ calibration_images/
 ```bat
 python .\tools\calibrate_checkerboard_extrinsics.py ^
   --base-dir .\calibration_images\SESSION_NAME\base ^
-  --aux-dir .\calibration_images\SESSION_NAME\aux ^
+  --aux-dir .\calibration_images\SESSION_NAME\aux_color ^
   --rig-calibration .\tools\checkerboard_rig_template.json ^
   --board-cols 9 ^
   --board-rows 6 ^
