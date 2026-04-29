@@ -1,8 +1,9 @@
 {
     "_note": "Copy this file and edit the paths and checkerboard values before running calibrate_checkerboard_extrinsics.py.",
+    "_note_capture": "If you used track_config_2_capture_images.json, point base_dir and aux_dir at calibration_images/<session>/base and calibration_images/<session>/aux.",
     "_note_paths": "Relative paths are resolved from this JSON file's directory.",
-    "base_dir": "../calibration_images/base",
-    "aux_dir": "../calibration_images/aux",
+    "base_dir": "../calibration_images/session_name/base",
+    "aux_dir": "../calibration_images/session_name/aux",
     "rig_calibration": "./checkerboard_rig_template.json",
     "checkerboard": {
         "board_cols": 9,

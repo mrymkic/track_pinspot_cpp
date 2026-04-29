@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <fstream>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <cstring>
 #include <memory>
@@ -22,6 +23,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <ctime>
 #include <vector>
 #include <array>
 
@@ -187,6 +189,19 @@ struct AppConfig {
     // Legacy fallback for older config files without rotation_matrix.
     bool use_aux_x_as_base_z = true;
     uint32_t subordinate_delay_off_master_usec = 160;
+    bool aux_synchronized_images_only = false;
+    bool enable_image_capture = false;
+    std::string capture_output_dir = "calibration_images";
+    bool capture_save_aux_depth = false;
+};
+
+struct ImageCaptureSession {
+    fs::path session_dir;
+    fs::path base_dir;
+    fs::path aux_dir;
+    fs::path aux_depth_dir;
+    bool save_aux_depth = false;
+    uint64_t next_index = 1;
 };
 
 std::array<double, 3> rotate_vc_y(const std::array<double, 3> &vc, double rotate_deg)
@@ -420,6 +435,10 @@ AppConfig load_config(const std::string &path)
     }
     cfg.subordinate_delay_off_master_usec = static_cast<uint32_t>(
         std::llround(parse_number_optional(text, "subordinate_delay_off_master_usec", 160.0)));
+    cfg.aux_synchronized_images_only = parse_bool_optional(text, "aux_synchronized_images_only", false);
+    cfg.enable_image_capture = parse_bool_optional(text, "enable_image_capture", false);
+    cfg.capture_output_dir = parse_string_optional(text, "capture_output_dir", "calibration_images");
+    cfg.capture_save_aux_depth = parse_bool_optional(text, "capture_save_aux_depth", false);
 
     return cfg;
 }
@@ -496,6 +515,263 @@ fs::path resolve_asset_path(const std::string &raw_path, const fs::path &config_
     }
     oss << "\n)";
     throw std::runtime_error(oss.str());
+}
+
+fs::path resolve_output_path(const std::string &raw_path, const fs::path &config_path)
+{
+    const fs::path input_path(raw_path);
+    if (input_path.is_absolute()) {
+        return input_path.lexically_normal();
+    }
+    return (config_path.parent_path() / input_path).lexically_normal();
+}
+
+std::string make_capture_session_name()
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+    const std::time_t current_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time{};
+    localtime_s(&local_time, &current_time);
+
+    std::ostringstream oss;
+    oss << std::put_time(&local_time, "%Y%m%d_%H%M%S")
+        << '_' << std::setw(3) << std::setfill('0') << millis.count();
+    return oss.str();
+}
+
+std::string make_capture_stem(uint64_t index)
+{
+    std::ostringstream oss;
+    oss << std::setw(4) << std::setfill('0') << index;
+    return oss.str();
+}
+
+void write_u16_le(std::ostream &os, uint16_t value)
+{
+    const char bytes[2] = {
+        static_cast<char>(value & 0xffu),
+        static_cast<char>((value >> 8) & 0xffu)
+    };
+    os.write(bytes, sizeof(bytes));
+}
+
+void write_u32_le(std::ostream &os, uint32_t value)
+{
+    const char bytes[4] = {
+        static_cast<char>(value & 0xffu),
+        static_cast<char>((value >> 8) & 0xffu),
+        static_cast<char>((value >> 16) & 0xffu),
+        static_cast<char>((value >> 24) & 0xffu)
+    };
+    os.write(bytes, sizeof(bytes));
+}
+
+void write_i32_le(std::ostream &os, int32_t value)
+{
+    write_u32_le(os, static_cast<uint32_t>(value));
+}
+
+void save_bgra32_image_as_bmp(const fs::path &path, k4a_image_t image)
+{
+    if (image == nullptr) {
+        throw std::runtime_error("Color image is null.");
+    }
+    if (k4a_image_get_format(image) != K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+        throw std::runtime_error("Expected BGRA32 color image for BMP output.");
+    }
+
+    const int width = k4a_image_get_width_pixels(image);
+    const int height = k4a_image_get_height_pixels(image);
+    const int stride_bytes = k4a_image_get_stride_bytes(image);
+    if (width <= 0 || height <= 0) {
+        throw std::runtime_error("Invalid color image dimensions.");
+    }
+    if (stride_bytes < width * 4) {
+        throw std::runtime_error("Unexpected BGRA32 image stride.");
+    }
+
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) {
+        throw std::runtime_error("Failed to open output file: " + path.string());
+    }
+
+    const uint32_t pixel_data_size = static_cast<uint32_t>(width) * static_cast<uint32_t>(height) * 4u;
+    const uint32_t file_size = 14u + 40u + pixel_data_size;
+
+    write_u16_le(ofs, 0x4d42u);
+    write_u32_le(ofs, file_size);
+    write_u16_le(ofs, 0u);
+    write_u16_le(ofs, 0u);
+    write_u32_le(ofs, 54u);
+
+    write_u32_le(ofs, 40u);
+    write_i32_le(ofs, width);
+    write_i32_le(ofs, -height);
+    write_u16_le(ofs, 1u);
+    write_u16_le(ofs, 32u);
+    write_u32_le(ofs, 0u);
+    write_u32_le(ofs, pixel_data_size);
+    write_i32_le(ofs, 2835);
+    write_i32_le(ofs, 2835);
+    write_u32_le(ofs, 0u);
+    write_u32_le(ofs, 0u);
+
+    const uint8_t *buffer = k4a_image_get_buffer(image);
+    for (int y = 0; y < height; ++y) {
+        const uint8_t *row = buffer + static_cast<size_t>(y) * static_cast<size_t>(stride_bytes);
+        ofs.write(reinterpret_cast<const char *>(row), static_cast<std::streamsize>(width * 4));
+    }
+
+    if (!ofs) {
+        throw std::runtime_error("Failed while writing BMP file: " + path.string());
+    }
+}
+
+void save_mjpg_image_as_jpeg(const fs::path &path, k4a_image_t image)
+{
+    if (image == nullptr) {
+        throw std::runtime_error("Color image is null.");
+    }
+    if (k4a_image_get_format(image) != K4A_IMAGE_FORMAT_COLOR_MJPG) {
+        throw std::runtime_error("Expected MJPG color image for JPEG output.");
+    }
+
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) {
+        throw std::runtime_error("Failed to open output file: " + path.string());
+    }
+
+    const uint8_t *buffer = k4a_image_get_buffer(image);
+    const size_t size_bytes = k4a_image_get_size(image);
+    ofs.write(reinterpret_cast<const char *>(buffer), static_cast<std::streamsize>(size_bytes));
+    if (!ofs) {
+        throw std::runtime_error("Failed while writing JPEG file: " + path.string());
+    }
+}
+
+void save_depth16_image_as_pgm(const fs::path &path, k4a_image_t image)
+{
+    if (image == nullptr) {
+        throw std::runtime_error("Depth image is null.");
+    }
+    if (k4a_image_get_format(image) != K4A_IMAGE_FORMAT_DEPTH16) {
+        throw std::runtime_error("Expected DEPTH16 image for PGM output.");
+    }
+
+    const int width = k4a_image_get_width_pixels(image);
+    const int height = k4a_image_get_height_pixels(image);
+    const int stride_bytes = k4a_image_get_stride_bytes(image);
+    if (width <= 0 || height <= 0) {
+        throw std::runtime_error("Invalid depth image dimensions.");
+    }
+    if (stride_bytes < width * 2) {
+        throw std::runtime_error("Unexpected DEPTH16 image stride.");
+    }
+
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) {
+        throw std::runtime_error("Failed to open output file: " + path.string());
+    }
+
+    ofs << "P5\n" << width << ' ' << height << "\n65535\n";
+    const uint8_t *buffer = k4a_image_get_buffer(image);
+    for (int y = 0; y < height; ++y) {
+        const uint8_t *row = buffer + static_cast<size_t>(y) * static_cast<size_t>(stride_bytes);
+        for (int x = 0; x < width; ++x) {
+            const uint16_t value =
+                static_cast<uint16_t>(row[2 * x]) |
+                (static_cast<uint16_t>(row[2 * x + 1]) << 8);
+            const char bytes[2] = {
+                static_cast<char>((value >> 8) & 0xffu),
+                static_cast<char>(value & 0xffu)
+            };
+            ofs.write(bytes, sizeof(bytes));
+        }
+    }
+
+    if (!ofs) {
+        throw std::runtime_error("Failed while writing PGM file: " + path.string());
+    }
+}
+
+fs::path save_kinect_color_image(const fs::path &directory, const std::string &stem, k4a_image_t image)
+{
+    const auto format = k4a_image_get_format(image);
+    if (format == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+        const fs::path path = directory / (stem + ".bmp");
+        save_bgra32_image_as_bmp(path, image);
+        return path;
+    }
+    if (format == K4A_IMAGE_FORMAT_COLOR_MJPG) {
+        const fs::path path = directory / (stem + ".jpg");
+        save_mjpg_image_as_jpeg(path, image);
+        return path;
+    }
+    throw std::runtime_error("Unsupported Kinect color image format for capture output.");
+}
+
+ImageCaptureSession create_image_capture_session(
+    const AppConfig &config,
+    const fs::path &config_path)
+{
+    ImageCaptureSession session;
+    const fs::path output_root = resolve_output_path(config.capture_output_dir, config_path);
+    session.session_dir = output_root / make_capture_session_name();
+    session.base_dir = session.session_dir / "base";
+    session.aux_dir = session.session_dir / "aux";
+    session.aux_depth_dir = session.session_dir / "aux_depth";
+    session.save_aux_depth = config.capture_save_aux_depth;
+
+    std::error_code ec;
+    fs::create_directories(session.base_dir, ec);
+    if (ec) {
+        throw std::runtime_error("Failed to create base capture directory: " + session.base_dir.string());
+    }
+    fs::create_directories(session.aux_dir, ec);
+    if (ec) {
+        throw std::runtime_error("Failed to create aux capture directory: " + session.aux_dir.string());
+    }
+    if (session.save_aux_depth) {
+        fs::create_directories(session.aux_depth_dir, ec);
+        if (ec) {
+            throw std::runtime_error("Failed to create aux depth capture directory: " + session.aux_depth_dir.string());
+        }
+    }
+
+    return session;
+}
+
+std::string save_capture_pair(
+    ImageCaptureSession &session,
+    k4a_image_t base_color_image,
+    k4a_image_t aux_color_image,
+    k4a_image_t aux_depth_image)
+{
+    if (base_color_image == nullptr) {
+        throw std::runtime_error("Base color image is not available for capture.");
+    }
+    if (aux_color_image == nullptr) {
+        throw std::runtime_error("Aux color image is not available for capture.");
+    }
+
+    const std::string stem = make_capture_stem(session.next_index++);
+    const fs::path base_path = save_kinect_color_image(session.base_dir, stem, base_color_image);
+    const fs::path aux_path = save_kinect_color_image(session.aux_dir, stem, aux_color_image);
+
+    std::ostringstream oss;
+    oss << "Saved Kinect capture pair stem=" << stem
+        << " base=" << base_path.string()
+        << " aux=" << aux_path.string();
+
+    if (session.save_aux_depth && aux_depth_image != nullptr) {
+        const fs::path depth_path = session.aux_depth_dir / (stem + ".pgm");
+        save_depth16_image_as_pgm(depth_path, aux_depth_image);
+        oss << " aux_depth=" << depth_path.string();
+    }
+
+    return oss.str();
 }
 
 fs::path get_runtime_log_path()
@@ -1208,15 +1484,13 @@ const char *wired_sync_mode_to_string(k4a_wired_sync_mode_t mode)
 k4a_device_configuration_t make_aux_device_config(
     const k4a_device_configuration_t &base_config,
     bool standalone_mode,
-    uint32_t subordinate_delay_off_master_usec)
+    uint32_t subordinate_delay_off_master_usec,
+    bool synchronized_images_only)
 {
     k4a_device_configuration_t aux_config = base_config;
     aux_config.color_format = K4A_IMAGE_FORMAT_COLOR_MJPG;
     aux_config.color_resolution = base_config.color_resolution;
-    // Keep wired sync enabled, but do not require color+depth to arrive as a matched pair on aux.
-    // We only consume aux depth in the app, and allowing single-image captures makes the stream
-    // more resilient when the color side drops behind.
-    aux_config.synchronized_images_only = false;
+    aux_config.synchronized_images_only = synchronized_images_only;
     aux_config.wired_sync_mode = standalone_mode
         ? K4A_WIRED_SYNC_MODE_STANDALONE
         : K4A_WIRED_SYNC_MODE_SUBORDINATE;
@@ -2182,8 +2456,19 @@ int main(int argc, char **argv)
         std::cout << "Tracked ear: " << config.tracked_ear << '\n';
         std::cout << "Aux depth correction: enabled when auxiliary depth is available\n";
         std::cout << "Aux stream mode: app uses depth-only; color stays enabled internally for wired sync\n";
-        std::cout << "Aux synchronized_images_only: false (prefer depth continuity over paired color/depth captures)\n";
+        std::cout << "Aux synchronized_images_only: "
+                  << (config.aux_synchronized_images_only ? "true" : "false");
+        if (config.aux_synchronized_images_only) {
+            std::cout << " (prefer paired color/depth captures for aux)\n";
+        } else {
+            std::cout << " (prefer depth continuity over paired color/depth captures)\n";
+        }
         std::cout << "Allow aux unsynced fallback: " << (config.allow_aux_unsynced_fallback ? "true" : "false") << '\n';
+        std::cout << "Image capture enabled: " << (config.enable_image_capture ? "true" : "false") << '\n';
+        if (config.enable_image_capture) {
+            std::cout << "Image capture output dir: " << config.capture_output_dir << '\n';
+            std::cout << "Capture aux depth image: " << (config.capture_save_aux_depth ? "true" : "false") << '\n';
+        }
         std::cout << "capture_timeout_ms: " << config.capture_timeout_ms << '\n';
         std::cout << "body_tracking_timeout_ms(config): " << config.body_tracking_timeout_ms << '\n';
         std::cout << "body_tracking_poll_mode: nonblocking (0 ms in 2-camera mode)\n";
@@ -2281,7 +2566,8 @@ int main(int argc, char **argv)
         k4a_device_configuration_t aux_config = make_aux_device_config(
             base_config,
             false,
-            config.subordinate_delay_off_master_usec);
+            config.subordinate_delay_off_master_usec,
+            config.aux_synchronized_images_only);
 
         // Start the subordinate first so it can wait for the master's sync pulse.
         if (aux_camera_enabled) {
@@ -2420,6 +2706,13 @@ int main(int argc, char **argv)
             append_runtime_log("Aux Azure Kinect window created.");
         }
 
+        std::optional<ImageCaptureSession> image_capture_session;
+        if (config.enable_image_capture) {
+            image_capture_session = create_image_capture_session(config, config_path);
+            info_and_log("Image capture session directory: " + image_capture_session->session_dir.string());
+            info_and_log("Press 'c' to save the current base/aux image pair.");
+        }
+
         LatestCapturePump base_capture_pump;
         base_capture_pump.start(base_device, 100, "base");
         info_and_log("Base capture pump started.");
@@ -2455,7 +2748,11 @@ int main(int argc, char **argv)
         bool pending_aux_subordinate_restart = false;
         bool pending_aux_standalone_restart = false;
 
-        std::cout << "2-Kinect tracking started. Press 'u' to force update, 'q' to quit." << '\n';
+        std::cout << "2-Kinect tracking started. Press 'u' to force update, 'q' to quit";
+        if (config.enable_image_capture) {
+            std::cout << ", 'c' to capture images";
+        }
+        std::cout << "." << '\n';
 
         while (true) {
             if ((base_window_initialized && !base_image_window.process_messages()) ||
@@ -2710,6 +3007,7 @@ int main(int argc, char **argv)
             }
 
             k4a_image_t base_color_image = nullptr;
+            k4a_image_t aux_color_image = nullptr;
             k4a_image_t aux_depth_image = nullptr;
             int color_width = 0;
             int color_height = 0;
@@ -2724,6 +3022,7 @@ int main(int argc, char **argv)
                 }
             }
             if (aux_capture_received) {
+                aux_color_image = k4a_capture_get_color_image(aux_capture);
                 aux_depth_image = k4a_capture_get_depth_image(aux_capture);
                 if (aux_depth_image != nullptr) {
                     aux_depth_width = k4a_image_get_width_pixels(aux_depth_image);
@@ -2864,6 +3163,79 @@ int main(int argc, char **argv)
                 aux_image_window.show_bgra(display_buffer.data());
             }
 
+            if (_kbhit()) {
+                const int key = _getch();
+                if (key == 'q') {
+                    if (ptu1 != nullptr) {
+                        ptu1->move(0, 0);
+                    }
+                    if (ptu2 != nullptr) {
+                        ptu2->move(0, 0);
+                    }
+                    if (ptu3 != nullptr) {
+                        ptu3->move(0, 0);
+                    }
+                    if (base_body_frame != nullptr) {
+                        k4abt_frame_release(base_body_frame);
+                        base_body_frame = nullptr;
+                    }
+                    if (aux_body_frame != nullptr) {
+                        k4abt_frame_release(aux_body_frame);
+                        aux_body_frame = nullptr;
+                    }
+                    if (base_color_image != nullptr) {
+                        k4a_image_release(base_color_image);
+                        base_color_image = nullptr;
+                    }
+                    if (aux_color_image != nullptr) {
+                        k4a_image_release(aux_color_image);
+                        aux_color_image = nullptr;
+                    }
+                    if (aux_depth_image != nullptr) {
+                        k4a_image_release(aux_depth_image);
+                        aux_depth_image = nullptr;
+                    }
+                    if (base_capture != nullptr) {
+                        k4a_capture_release(base_capture);
+                        base_capture = nullptr;
+                    }
+                    if (aux_capture != nullptr) {
+                        k4a_capture_release(aux_capture);
+                        aux_capture = nullptr;
+                    }
+                    break;
+                }
+                if (key == 'u' && last_fused_tracked_ear.has_value()) {
+                    auto force_update = [&](TrackingController *pal) {
+                        pal->calculate_and_move(*last_fused_tracked_ear, Clock::now(), true);
+                    };
+
+                    std::vector<std::thread> threads;
+                    threads.emplace_back(force_update, &pal1);
+                    threads.emplace_back(force_update, &pal2);
+                    threads.emplace_back(force_update, &pal3);
+                    for (auto &th : threads) {
+                        th.join();
+                    }
+                    std::cout << "Manually updated\n";
+                } else if (key == 'c') {
+                    if (!image_capture_session.has_value()) {
+                        warn_and_log("Image capture is disabled. Set enable_image_capture=true in the config.");
+                    } else {
+                        try {
+                            const std::string save_message = save_capture_pair(
+                                *image_capture_session,
+                                base_color_image,
+                                aux_color_image,
+                                aux_depth_image);
+                            info_and_log(save_message);
+                        } catch (const std::exception &capture_error) {
+                            warn_and_log(std::string("Failed to save image capture: ") + capture_error.what());
+                        }
+                    }
+                }
+            }
+
             if (base_body_frame != nullptr) {
                 k4abt_frame_release(base_body_frame);
             }
@@ -2872,6 +3244,9 @@ int main(int argc, char **argv)
             }
             if (base_color_image != nullptr) {
                 k4a_image_release(base_color_image);
+            }
+            if (aux_color_image != nullptr) {
+                k4a_image_release(aux_color_image);
             }
             if (aux_depth_image != nullptr) {
                 k4a_image_release(aux_depth_image);
@@ -2933,7 +3308,8 @@ int main(int argc, char **argv)
                 const auto standalone_aux_config = make_aux_device_config(
                     base_config,
                     true,
-                    config.subordinate_delay_off_master_usec);
+                    config.subordinate_delay_off_master_usec,
+                    config.aux_synchronized_images_only);
                 aux_capture_pump.stop();
                 shutdown_and_destroy_tracker(&aux_tracker, "auxiliary");
                 last_aux_capture_generation_enqueued = 0;
@@ -2971,35 +3347,6 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            if (_kbhit()) {
-                const int key = _getch();
-                if (key == 'q') {
-                    if (ptu1 != nullptr) {
-                        ptu1->move(0, 0);
-                    }
-                    if (ptu2 != nullptr) {
-                        ptu2->move(0, 0);
-                    }
-                    if (ptu3 != nullptr) {
-                        ptu3->move(0, 0);
-                    }
-                    break;
-                }
-                if (key == 'u' && last_fused_tracked_ear.has_value()) {
-                    auto force_update = [&](TrackingController *pal) {
-                        pal->calculate_and_move(*last_fused_tracked_ear, Clock::now(), true);
-                    };
-
-                    std::vector<std::thread> threads;
-                    threads.emplace_back(force_update, &pal1);
-                    threads.emplace_back(force_update, &pal2);
-                    threads.emplace_back(force_update, &pal3);
-                    for (auto &th : threads) {
-                        th.join();
-                    }
-                    std::cout << "Manually updated\n";
-                }
-            }
         }
 
         shutdown_and_destroy_tracker(&base_tracker, "base");

@@ -196,6 +196,8 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
   - CUDA + lite model で `base + aux` 同時 body tracking を試す診断用
 - `track_config_2_capture_only.json`
   - body tracking 無効の capture-only 切り分け用
+- `track_config_2_capture_images.json`
+  - チェッカーボード撮影向けの Kinect 画像キャプチャ用
 - `measure_vram_bodytracking.ps1`
   - `nvidia-smi` ベースの VRAM サンプリング補助スクリプト
 - `CMakeLists.txt`
@@ -221,6 +223,29 @@ cmd.exe /c ""C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Too
 - `aux` 骨格が不安定な場面では depth 補正へフォールバック
 - `aux_translation_mm` / `rotation_matrix` は仮値として扱う
 - 同期維持のため、`aux` の color は内部的には有効
+
+## Kinect 画像キャプチャ
+
+チェッカーボード画像を取得したいときは、`track_config_2_capture_images.json` を使って `track_test_cpp_2cam` を起動します。
+
+- `enable_body_tracking = false`
+- `enable_image_capture = true`
+- `capture_output_dir = "calibration_images"`
+- `aux_synchronized_images_only = true`
+
+起動後にチェッカーボードを `base` / `aux` の両方に見せ、`c` キーを押すと現在の画像ペアを保存します。
+
+- `base`: `calibration_images/<session>/base/0001.bmp`
+- `aux`: `calibration_images/<session>/aux/0001.jpg`
+- 必要なら `capture_save_aux_depth = true` で `aux_depth` も保存可能
+
+`<session>` には実行時刻ベースのセッション名が付きます。保存された `base` と `aux` のディレクトリは、そのまま `tools/calibrate_checkerboard_extrinsics.py` の入力に使えます。
+
+例:
+
+```bat
+build_2cam_x64\track_test_cpp_2cam.exe track_config_2_capture_images.json
+```
 
 ## 既知の注意点
 

@@ -60,19 +60,51 @@ rig calibration JSON には次の情報が必要です。
 python -m pip install numpy opencv-python
 ```
 
+## Kinect画像の撮影方法
+
+チェッカーボード画像を新しく撮影したい場合は、`track_test_2.cpp` の画像キャプチャ機能を使えます。
+
+1. `track_config_2_capture_images.json` を指定して `track_test_cpp_2cam` を起動します
+2. チェッカーボードを `base` / `aux` の両方に見えるように配置します
+3. `c` キーを押すと、その時点の画像ペアが保存されます
+
+保存先は `capture_output_dir` で指定したディレクトリ配下に、実行ごとのサブディレクトリとして作成されます。
+
+```text
+calibration_images/
+  20260429_153012_123/
+    base/
+      0001.bmp
+      0002.bmp
+    aux/
+      0001.jpg
+      0002.jpg
+```
+
+この `base` と `aux` のディレクトリを、そのまま `calibrate_checkerboard_extrinsics.py` の `--base-dir` / `--aux-dir` に渡せます。
+
+`track_config_2_capture_images.json` では、次の設定をあらかじめ有効にしています。
+
+- `enable_body_tracking = false`
+- `enable_image_capture = true`
+- `capture_output_dir = "calibration_images"`
+- `aux_synchronized_images_only = true`
+
+`aux_synchronized_images_only = true` にしているのは、補助カメラ側でも color/depth が揃った capture を取りやすくし、チェッカーボード撮影を安定させるためです。
+
 ## 実行例
 
 ### コマンドライン引数だけで実行する場合
 
 ```bat
 python .\tools\calibrate_checkerboard_extrinsics.py ^
-  --base-dir .\calibration_images\base ^
-  --aux-dir .\calibration_images\aux ^
+  --base-dir .\calibration_images\SESSION_NAME\base ^
+  --aux-dir .\calibration_images\SESSION_NAME\aux ^
   --rig-calibration .\tools\checkerboard_rig_template.json ^
   --board-cols 9 ^
   --board-rows 6 ^
   --square-size-mm 25 ^
-  --output-json .\calibration_images\checkerboard_result.json ^
+  --output-json .\calibration_images\SESSION_NAME\checkerboard_result.json ^
   --config-in .\track_config_2.json ^
   --config-out .\track_config_2_checkerboard.json
 ```
