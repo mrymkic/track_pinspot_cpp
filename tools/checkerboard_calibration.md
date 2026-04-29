@@ -16,6 +16,7 @@ In other words, it outputs the `aux depth -> base depth` transform that should b
 1. A directory of base-camera checkerboard images.
 2. A directory of aux-camera checkerboard images.
 3. A rig calibration JSON based on `checkerboard_rig_template.json`.
+4. Optionally, a calibration config JSON based on `checkerboard_calibration_config_template.json`.
 
 Image pairs are matched by stem:
 
@@ -23,6 +24,15 @@ Image pairs are matched by stem:
 base/0001.png <-> aux/0001.png
 base/0002.png <-> aux/0002.png
 ```
+
+Here, `stem` means the filename without its extension.
+
+```text
+base/0001.png -> stem = 0001
+aux/0001.jpg  -> stem = 0001
+```
+
+So `0001.png` and `0001.jpg` can still be paired, but `base_0001.png` and `aux_0001.png` will not be paired unless the filenames themselves match.
 
 The rig calibration JSON must contain:
 
@@ -52,6 +62,8 @@ python -m pip install numpy opencv-python
 
 ## Example
 
+### Command-line only
+
 ```bat
 python .\tools\calibrate_checkerboard_extrinsics.py ^
   --base-dir .\calibration_images\base ^
@@ -64,6 +76,25 @@ python .\tools\calibrate_checkerboard_extrinsics.py ^
   --config-in .\track_config_2.json ^
   --config-out .\track_config_2_checkerboard.json
 ```
+
+### Using a calibration config JSON
+
+Edit `checkerboard_calibration_config_template.json`, then run:
+
+```bat
+python .\tools\calibrate_checkerboard_extrinsics.py ^
+  --calibration-config .\tools\checkerboard_calibration_config_template.json
+```
+
+The config can hold:
+
+- image directories
+- rig calibration JSON path
+- checkerboard `board_cols`, `board_rows`, `square_size_mm`
+- optional output report path
+- optional input/output tracking config paths
+
+CLI flags still work and override the JSON values when both are provided.
 
 ## Outputs
 

@@ -101,6 +101,19 @@ class PairEstimate:
     translation_aux_to_base_mm: np.ndarray
 
 
+@dataclass
+class CalibrationRunSettings:
+    base_dir: Path
+    aux_dir: Path
+    rig_calibration: Path
+    board_cols: int
+    board_rows: int
+    square_size_mm: float
+    output_json: Path | None
+    config_in: Path | None
+    config_out: Path | None
+
+
 def _as_float_array(data: Any, shape: tuple[int, ...], label: str) -> np.ndarray:
     array = np.asarray(data, dtype=np.float64)
     if array.shape != shape:
@@ -111,6 +124,13 @@ def _as_float_array(data: Any, shape: tuple[int, ...], label: str) -> np.ndarray
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _load_object_json(path: Path, label: str) -> dict[str, Any]:
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be a JSON object.")
+    return payload
 
 
 def _load_camera_calibration(payload: dict[str, Any], label: str) -> CameraCalibration:
@@ -165,7 +185,7 @@ def _load_camera_calibration(payload: dict[str, Any], label: str) -> CameraCalib
 
 
 def _load_rig_calibration(path: Path) -> tuple[CameraCalibration, CameraCalibration]:
-    payload = _load_json(path)
+    payload = _load_object_json(path, "Rig calibration JSON")
     if "base" not in payload or "aux" not in payload:
         raise ValueError("Rig calibration JSON must contain top-level `base` and `aux` objects.")
     return (
@@ -360,33 +380,139 @@ def _update_config_file(
         handle.write("\n")
 
 
+def _parse_optional_path_from_config(value: Any, config_dir: Path, label: str) -> Path | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string path.")
+    path = Path(value)
+    if not path.is_absolute():
+        path = config_dir / path
+    return path
+
+
+def _parse_optional_int(value: Any, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be an integer, got boolean.")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be an integer.") from exc
+
+
+def _parse_optional_float(value: Any, label: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a number, got boolean.")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a number.") from exc
+
+
+def _resolve_run_settings(args: argparse.Namespace) -> CalibrationRunSettings:
+    payload: dict[str, Any] = {}
+    checkerboard_payload: dict[str, Any] = {}
+    config_dir = Path.cwd()
+
+    if args.calibration_config is not None:
+        payload = _load_object_json(args.calibration_config, "Calibration config JSON")
+        config_dir = args.calibration_config.parent
+        checkerboard_value = payload.get("checkerboard")
+        if checkerboard_value is not None:
+            if not isinstance(checkerboard_value, dict):
+                raise ValueError("`checkerboard` in calibration config must be a JSON object.")
+            checkerboard_payload = checkerboard_value
+
+    def _coalesce_path(cli_value: Path | None, config_key: str) -> Path | None:
+        if cli_value is not None:
+            return cli_value
+        return _parse_optional_path_from_config(payload.get(config_key), config_dir, config_key)
+
+    def _coalesce_board_setting(cli_value: int | float | None, key: str) -> int | float | None:
+        if cli_value is not None:
+            return cli_value
+        if key in checkerboard_payload:
+            return checkerboard_payload[key]
+        return payload.get(key)
+
+    base_dir = _coalesce_path(args.base_dir, "base_dir")
+    aux_dir = _coalesce_path(args.aux_dir, "aux_dir")
+    rig_calibration = _coalesce_path(args.rig_calibration, "rig_calibration")
+    output_json = _coalesce_path(args.output_json, "output_json")
+    config_in = _coalesce_path(args.config_in, "config_in")
+    config_out = _coalesce_path(args.config_out, "config_out")
+    board_cols = _parse_optional_int(_coalesce_board_setting(args.board_cols, "board_cols"), "board_cols")
+    board_rows = _parse_optional_int(_coalesce_board_setting(args.board_rows, "board_rows"), "board_rows")
+    square_size_mm = _parse_optional_float(
+        _coalesce_board_setting(args.square_size_mm, "square_size_mm"),
+        "square_size_mm",
+    )
+
+    missing: list[str] = []
+    if base_dir is None:
+        missing.append("base_dir / --base-dir")
+    if aux_dir is None:
+        missing.append("aux_dir / --aux-dir")
+    if rig_calibration is None:
+        missing.append("rig_calibration / --rig-calibration")
+    if board_cols is None:
+        missing.append("checkerboard.board_cols / --board-cols")
+    if board_rows is None:
+        missing.append("checkerboard.board_rows / --board-rows")
+    if square_size_mm is None:
+        missing.append("checkerboard.square_size_mm / --square-size-mm")
+    if missing:
+        raise SystemExit(
+            "Missing required calibration settings: "
+            + ", ".join(missing)
+            + ". Provide them via CLI or --calibration-config."
+        )
+
+    return CalibrationRunSettings(
+        base_dir=base_dir,
+        aux_dir=aux_dir,
+        rig_calibration=rig_calibration,
+        board_cols=board_cols,
+        board_rows=board_rows,
+        square_size_mm=square_size_mm,
+        output_json=output_json,
+        config_in=config_in,
+        config_out=config_out,
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Estimate aux-depth to base-depth extrinsics from paired checkerboard images."
     )
-    parser.add_argument("--base-dir", required=True, type=Path, help="Directory containing base checkerboard images.")
-    parser.add_argument("--aux-dir", required=True, type=Path, help="Directory containing aux checkerboard images.")
+    parser.add_argument(
+        "--calibration-config",
+        type=Path,
+        help="Optional JSON file containing calibration inputs such as paths and checkerboard settings.",
+    )
+    parser.add_argument("--base-dir", type=Path, help="Directory containing base checkerboard images.")
+    parser.add_argument("--aux-dir", type=Path, help="Directory containing aux checkerboard images.")
     parser.add_argument(
         "--rig-calibration",
-        required=True,
         type=Path,
         help="JSON file containing base/aux color intrinsics and color<->depth extrinsics.",
     )
     parser.add_argument(
         "--board-cols",
-        required=True,
         type=int,
         help="Checkerboard inner-corner count along columns.",
     )
     parser.add_argument(
         "--board-rows",
-        required=True,
         type=int,
         help="Checkerboard inner-corner count along rows.",
     )
     parser.add_argument(
         "--square-size-mm",
-        required=True,
         type=float,
         help="Checkerboard square size in millimeters.",
     )
@@ -411,16 +537,17 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     _import_dependencies()
-    if (args.config_in is None) != (args.config_out is None):
+    settings = _resolve_run_settings(args)
+    if (settings.config_in is None) != (settings.config_out is None):
         raise SystemExit("--config-in and --config-out must be provided together.")
-    if args.board_cols <= 1 or args.board_rows <= 1:
+    if settings.board_cols <= 1 or settings.board_rows <= 1:
         raise SystemExit("Checkerboard inner-corner counts must both be greater than 1.")
-    if args.square_size_mm <= 0.0:
+    if settings.square_size_mm <= 0.0:
         raise SystemExit("--square-size-mm must be positive.")
 
-    base_calibration, aux_calibration = _load_rig_calibration(args.rig_calibration)
-    base_index = _build_image_index(args.base_dir)
-    aux_index = _build_image_index(args.aux_dir)
+    base_calibration, aux_calibration = _load_rig_calibration(settings.rig_calibration)
+    base_index = _build_image_index(settings.base_dir)
+    aux_index = _build_image_index(settings.aux_dir)
     shared_stems = sorted(set(base_index) & set(aux_index))
     if not shared_stems:
         raise SystemExit("No paired checkerboard images were found. Match files by stem across both directories.")
@@ -433,11 +560,11 @@ def main() -> int:
         print(f"Skipping {len(missing_in_base)} aux-only images: {', '.join(missing_in_base[:5])}", file=sys.stderr)
 
     object_points = _make_board_object_points(
-        args.board_cols,
-        args.board_rows,
-        args.square_size_mm,
+        settings.board_cols,
+        settings.board_rows,
+        settings.square_size_mm,
     )
-    pattern_size = (args.board_cols, args.board_rows)
+    pattern_size = (settings.board_cols, settings.board_rows)
 
     pair_estimates: list[PairEstimate] = []
     skipped_stems: list[str] = []
@@ -522,15 +649,15 @@ def main() -> int:
         )
     )
 
-    if args.output_json is not None:
-        with args.output_json.open("w", encoding="utf-8", newline="\n") as handle:
+    if settings.output_json is not None:
+        with settings.output_json.open("w", encoding="utf-8", newline="\n") as handle:
             json.dump(result_payload, handle, ensure_ascii=False, indent=4)
             handle.write("\n")
-        print(f"\nWrote report JSON: {args.output_json}")
+        print(f"\nWrote report JSON: {settings.output_json}")
 
-    if args.config_in is not None and args.config_out is not None:
-        _update_config_file(args.config_in, args.config_out, average_translation_mm, average_rotation)
-        print(f"Wrote patched config JSON: {args.config_out}")
+    if settings.config_in is not None and settings.config_out is not None:
+        _update_config_file(settings.config_in, settings.config_out, average_translation_mm, average_rotation)
+        print(f"Wrote patched config JSON: {settings.config_out}")
 
     return 0
 

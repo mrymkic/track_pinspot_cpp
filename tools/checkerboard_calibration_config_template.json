@@ -1,0 +1,15 @@
+{
+    "_note": "Copy this file and edit the paths and checkerboard values before running calibrate_checkerboard_extrinsics.py.",
+    "_note_paths": "Relative paths are resolved from this JSON file's directory.",
+    "base_dir": "../calibration_images/base",
+    "aux_dir": "../calibration_images/aux",
+    "rig_calibration": "./checkerboard_rig_template.json",
+    "checkerboard": {
+        "board_cols": 9,
+        "board_rows": 6,
+        "square_size_mm": 25.0
+    },
+    "output_json": "../calibration_images/checkerboard_result.json",
+    "config_in": "../track_config_2.json",
+    "config_out": "../track_config_2_checkerboard.json"
+}
