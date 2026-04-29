@@ -209,6 +209,8 @@ struct AppConfig {
     bool enable_image_capture = false;
     std::string capture_output_dir = "calibration_images";
     bool capture_save_aux_depth = false;
+    bool enable_fusion_trace_csv = false;
+    std::string fusion_trace_csv_path = "fusion_eval/fusion_trace.csv";
 };
 
 struct ImageCaptureSession {
@@ -462,6 +464,8 @@ AppConfig load_config(const std::string &path)
     cfg.enable_image_capture = parse_bool_optional(text, "enable_image_capture", false);
     cfg.capture_output_dir = parse_string_optional(text, "capture_output_dir", "calibration_images");
     cfg.capture_save_aux_depth = parse_bool_optional(text, "capture_save_aux_depth", false);
+    cfg.enable_fusion_trace_csv = parse_bool_optional(text, "enable_fusion_trace_csv", false);
+    cfg.fusion_trace_csv_path = parse_string_optional(text, "fusion_trace_csv_path", "fusion_eval/fusion_trace.csv");
 
     return cfg;
 }
@@ -1995,6 +1999,158 @@ const char *joint_confidence_to_string(k4abt_joint_confidence_level_t confidence
     }
 }
 
+class FusionTraceWriter {
+public:
+    void open_if_enabled(const AppConfig &config, const fs::path &config_path)
+    {
+        if (!config.enable_fusion_trace_csv) {
+            return;
+        }
+
+        path_ = resolve_output_path(config.fusion_trace_csv_path, config_path);
+        std::error_code ec;
+        if (!path_.parent_path().empty()) {
+            fs::create_directories(path_.parent_path(), ec);
+            if (ec) {
+                throw std::runtime_error("Failed to create fusion trace directory: " + path_.parent_path().string());
+            }
+        }
+
+        ofs_.open(path_, std::ios::trunc);
+        if (!ofs_) {
+            throw std::runtime_error("Failed to open fusion trace CSV: " + path_.string());
+        }
+
+        ofs_ << "frame_index,base_capture_generation,aux_capture_generation,"
+                "base_depth_ts_us,aux_depth_ts_us,sync_phase_us,sync_phase_error_us,"
+                "source,base_conf,aux_body_conf,base_found,aux_body_found,aux_depth_found,"
+                "base_x_mm,base_y_mm,base_z_mm,"
+                "aux_body_in_base_x_mm,aux_body_in_base_y_mm,aux_body_in_base_z_mm,"
+                "aux_depth_in_base_x_mm,aux_depth_in_base_y_mm,aux_depth_in_base_z_mm,"
+                "fused_x_mm,fused_y_mm,fused_z_mm,fused_minus_base_z_mm,"
+                "aux_match_err_mm,aux_reason\n";
+        enabled_ = true;
+    }
+
+    bool enabled() const
+    {
+        return enabled_;
+    }
+
+    const fs::path &path() const
+    {
+        return path_;
+    }
+
+    void write_row(
+        uint64_t frame_index,
+        uint64_t base_capture_generation,
+        uint64_t aux_capture_generation,
+        const std::optional<int64_t> &base_depth_ts_us,
+        const std::optional<int64_t> &aux_depth_ts_us,
+        const std::optional<int64_t> &sync_phase_us,
+        const std::optional<int64_t> &sync_phase_error_us,
+        const std::string &source,
+        const std::optional<JointSample3D> &base_ear,
+        const std::optional<JointSample3D> &aux_ear,
+        const std::optional<std::array<double, 3>> &aux_body_in_base,
+        const std::optional<std::array<double, 3>> &aux_depth_in_base,
+        const std::optional<AuxDepthSample> &aux_depth_sample,
+        const std::optional<std::array<double, 3>> &fused_ear,
+        const AuxDepthDebugInfo &aux_depth_debug)
+    {
+        if (!enabled_ || !ofs_) {
+            return;
+        }
+
+        ofs_ << frame_index << ','
+             << base_capture_generation << ','
+             << aux_capture_generation << ',';
+        append_optional_int64(base_depth_ts_us);
+        ofs_ << ',';
+        append_optional_int64(aux_depth_ts_us);
+        ofs_ << ',';
+        append_optional_int64(sync_phase_us);
+        ofs_ << ',';
+        append_optional_int64(sync_phase_error_us);
+        ofs_ << ','
+             << csv_escape(source) << ','
+             << csv_escape(base_ear.has_value() ? joint_confidence_to_string(base_ear->confidence_level) : "MISSING") << ','
+             << csv_escape(aux_ear.has_value() ? joint_confidence_to_string(aux_ear->confidence_level) : "MISSING") << ','
+             << (base_ear.has_value() ? "1" : "0") << ','
+             << (aux_body_in_base.has_value() ? "1" : "0") << ','
+             << (aux_depth_sample.has_value() ? "1" : "0") << ',';
+
+        append_optional_vec3(base_ear.has_value() ? std::optional<std::array<double, 3>>(base_ear->position) : std::nullopt);
+        ofs_ << ',';
+        append_optional_vec3(aux_body_in_base);
+        ofs_ << ',';
+        append_optional_vec3(aux_depth_in_base);
+        ofs_ << ',';
+        append_optional_vec3(fused_ear);
+        ofs_ << ',';
+        if (fused_ear.has_value() && base_ear.has_value()) {
+            append_value((*fused_ear)[2] - base_ear->position[2]);
+        }
+        ofs_ << ',';
+        if (aux_depth_sample.has_value()) {
+            append_value(aux_depth_sample->spatial_error_mm);
+        }
+        ofs_ << ','
+             << csv_escape(aux_depth_debug.failure_reason)
+             << '\n';
+    }
+
+private:
+    static std::string csv_escape(const std::string &value)
+    {
+        std::string escaped = "\"";
+        for (char ch : value) {
+            if (ch == '"') {
+                escaped += "\"\"";
+            } else {
+                escaped += ch;
+            }
+        }
+        escaped += '"';
+        return escaped;
+    }
+
+    void append_optional_int64(const std::optional<int64_t> &value)
+    {
+        if (value.has_value()) {
+            ofs_ << *value;
+        }
+    }
+
+    void append_value(double value)
+    {
+        ofs_ << std::fixed << std::setprecision(6) << value;
+    }
+
+    void append_vec3(const std::array<double, 3> &value)
+    {
+        append_value(value[0]);
+        ofs_ << ',';
+        append_value(value[1]);
+        ofs_ << ',';
+        append_value(value[2]);
+    }
+
+    void append_optional_vec3(const std::optional<std::array<double, 3>> &value)
+    {
+        if (value.has_value()) {
+            append_vec3(*value);
+        } else {
+            ofs_ << ",,";
+        }
+    }
+
+    bool enabled_ = false;
+    fs::path path_;
+    std::ofstream ofs_;
+};
+
 std::optional<std::array<float, 2>> convert_3d_to_color_2d(
     const k4a_calibration_t &calib,
     const std::array<double, 3> &p3d)
@@ -2514,6 +2670,10 @@ int main(int argc, char **argv)
             std::cout << "Image capture output dir: " << config.capture_output_dir << '\n';
             std::cout << "Capture aux depth image: " << (config.capture_save_aux_depth ? "true" : "false") << '\n';
         }
+        std::cout << "Fusion trace CSV enabled: " << (config.enable_fusion_trace_csv ? "true" : "false") << '\n';
+        if (config.enable_fusion_trace_csv) {
+            std::cout << "Fusion trace CSV path: " << config.fusion_trace_csv_path << '\n';
+        }
         std::cout << "capture_timeout_ms: " << config.capture_timeout_ms << '\n';
         std::cout << "body_tracking_timeout_ms(config): " << config.body_tracking_timeout_ms << '\n';
         std::cout << "body_tracking_poll_mode: nonblocking (0 ms in 2-camera mode)\n";
@@ -2758,6 +2918,12 @@ int main(int argc, char **argv)
             info_and_log("Press 'c' to save the current base/aux image pair.");
         }
 
+        FusionTraceWriter fusion_trace_writer;
+        fusion_trace_writer.open_if_enabled(config, config_path);
+        if (fusion_trace_writer.enabled()) {
+            info_and_log("Fusion trace CSV: " + fusion_trace_writer.path().string());
+        }
+
         LatestCapturePump base_capture_pump;
         base_capture_pump.start(base_device, 100, "base");
         info_and_log("Base capture pump started.");
@@ -2790,6 +2956,7 @@ int main(int argc, char **argv)
         uint64_t last_aux_capture_generation_enqueued = 0;
         uint64_t last_sync_sample_base_generation = 0;
         uint64_t last_sync_sample_aux_generation = 0;
+        uint64_t fusion_trace_frame_index = 0;
         bool pending_aux_subordinate_restart = false;
         bool pending_aux_standalone_restart = false;
 
@@ -3074,6 +3241,12 @@ int main(int argc, char **argv)
                     aux_depth_height = k4a_image_get_height_pixels(aux_depth_image);
                 }
             }
+            const auto base_depth_ts_for_trace = base_capture != nullptr
+                ? get_capture_depth_timestamp_usec(base_capture)
+                : std::nullopt;
+            const auto aux_depth_ts_for_trace = aux_capture != nullptr
+                ? get_capture_depth_timestamp_usec(aux_capture)
+                : std::nullopt;
 
             auto base_ear = (base_capture_fresh && base_body_frame_ok && base_body_frame != nullptr)
                 ? get_tracked_ear_3d_from_body_frame(base_body_frame, config.tracked_ear)
@@ -3097,6 +3270,9 @@ int main(int argc, char **argv)
                 ? sample_aux_depth_point_for_base_joint(aux_calibration, aux_capture, base_ear->position, aux_tf, &aux_depth_debug)
                 : std::nullopt;
             const bool aux_depth_available = aux_depth_sample.has_value();
+            auto aux_depth_in_base = aux_depth_sample.has_value()
+                ? std::optional<std::array<double, 3>>(transform_aux_to_base(aux_depth_sample->sampled_aux_point_3d, aux_tf))
+                : std::nullopt;
             last_aux_tracked_ear_2d = std::nullopt;
             if (aux_body_ear_2d.has_value()) {
                 last_aux_tracked_ear_2d = aux_body_ear_2d;
@@ -3110,8 +3286,7 @@ int main(int argc, char **argv)
                 fused_ear = fuse_two_points(base_ear->position, *aux_body_ear_in_base);
                 fused_ear_source = "base_xy + aux_body_z";
             } else if (base_ear_confident && aux_depth_available) {
-                const auto aux_in_base = transform_aux_to_base(aux_depth_sample->sampled_aux_point_3d, aux_tf);
-                fused_ear = fuse_two_points(base_ear->position, aux_in_base);
+                fused_ear = fuse_two_points(base_ear->position, *aux_depth_in_base);
                 fused_ear_source = "base_xy + aux_depth_z";
             } else if (base_ear_confident) {
                 fused_ear = base_ear->position;
@@ -3173,6 +3348,25 @@ int main(int argc, char **argv)
                     }
                 }
                 std::cout << '\n';
+            }
+
+            if (fusion_trace_writer.enabled()) {
+                fusion_trace_writer.write_row(
+                    ++fusion_trace_frame_index,
+                    base_capture_generation,
+                    aux_capture_generation,
+                    base_depth_ts_for_trace,
+                    aux_depth_ts_for_trace,
+                    current_sync_phase_us,
+                    current_sync_phase_error_us,
+                    fused_ear_source,
+                    base_ear,
+                    aux_ear,
+                    aux_body_ear_in_base,
+                    aux_depth_in_base,
+                    aux_depth_sample,
+                    fused_ear,
+                    aux_depth_debug);
             }
 
             if (base_color_image != nullptr && base_window_initialized && color_width > 0 && color_height > 0) {

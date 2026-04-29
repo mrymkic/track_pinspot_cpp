@@ -194,12 +194,16 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
   - CUDA + full model で `base + aux` 同時 body tracking を試す診断用
 - `track_config_2_bt_cuda_lite_dual.json`
   - CUDA + lite model で `base + aux` 同時 body tracking を試す診断用
+- `track_config_2_bt_cuda_lite_dual_eval.json`
+  - CUDA + lite model の 2台同時 body tracking に加えて、融合座標の CSV トレース保存を有効にした評価用
 - `track_config_2_capture_only.json`
   - body tracking 無効の capture-only 切り分け用
 - `track_config_2_capture_images.json`
   - チェッカーボード撮影向けの Kinect 画像キャプチャ用
 - `measure_vram_bodytracking.ps1`
   - `nvidia-smi` ベースの VRAM サンプリング補助スクリプト
+- `tools/evaluate_fused_coordinates.py`
+  - 融合座標トレース CSV から、内部整合性と既知座標に対する誤差を評価するスクリプト
 - `CMakeLists.txt`
   - ビルド設定と runtime DLL staging
 
@@ -249,6 +253,55 @@ Windows では `aux` が予約名なので、補助カメラ側の保存フォ�
 ```bat
 build_2cam_x64\track_test_cpp_2cam.exe track_config_2_capture_images.json
 ```
+
+## 統合座標の評価
+
+融合後の座標がどの程度そろっているかを確認したいときは、`track_config_2_bt_cuda_lite_dual_eval.json` を使って `track_test_cpp_2cam` を起動します。
+
+- `enable_aux_body_tracking = true`
+- `enable_fusion_trace_csv = true`
+- `fusion_trace_csv_path = "fusion_eval/fusion_trace.csv"`
+
+この config では、実行中の各フレームについて `base` 座標、`aux` の body tracking 座標、`aux` depth 補正座標、最終的な fused 座標を CSV に保存します。
+
+例:
+
+```bat
+build_2cam_x64\track_test_cpp_2cam.exe track_config_2_bt_cuda_lite_dual_eval.json
+```
+
+保存された CSV は `tools/evaluate_fused_coordinates.py` で評価できます。
+
+内部整合性だけを見る例:
+
+```bat
+python .\tools\evaluate_fused_coordinates.py --trace-csv .\fusion_eval\fusion_trace.csv
+```
+
+既知の固定座標と比べる例:
+
+```bat
+python .\tools\evaluate_fused_coordinates.py --trace-csv .\fusion_eval\fusion_trace.csv --static-target-mm 0 0 1500
+```
+
+外部の基準 CSV と時刻合わせして比べる例:
+
+```bat
+python .\tools\evaluate_fused_coordinates.py --trace-csv .\fusion_eval\fusion_trace.csv --reference-csv .\fusion_eval\reference.csv --reference-time-col timestamp_us --reference-x-col x_mm --reference-y-col y_mm --reference-z-col z_mm
+```
+
+主に見る項目:
+
+- `cross_camera_alignment.base_vs_aux_body`
+  - `base` と `aux` body tracking の 3D 一致度
+- `cross_camera_alignment.base_vs_aux_depth`
+  - `base` と `aux` depth 補正点の 3D 一致度
+- `z_delta_mm`
+  - fused の Z が `base` 単体よりどれだけ動いたか
+- `reference_error` / `static_target_error`
+  - 真値がある場合の絶対誤差
+
+真の精度評価には、固定治具などで既知の 3D 座標を用意するか、別系統の基準計測 CSV を与える必要があります。基準なしでも、2台の一致度やフレーム間のばらつきから外部キャリブレーションの良し悪しはかなり見えます。
 
 ## 既知の注意点
 

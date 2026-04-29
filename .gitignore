@@ -43,6 +43,7 @@ compile_commands.json
 track_test_2_runtime.log
 *.mkv
 calibration_images/
+fusion_eval/
 
 # Python cache
 __pycache__/
