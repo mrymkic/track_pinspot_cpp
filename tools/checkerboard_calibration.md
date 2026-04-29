@@ -67,6 +67,7 @@ python -m pip install numpy opencv-python
 1. `track_config_2_capture_images.json` を指定して `track_test_cpp_2cam` を起動します
 2. チェッカーボードを `base` / `aux` の両方に見えるように配置します
 3. `c` キーを押すと、その時点の画像ペアが保存されます
+4. 保存に成功すると、映像ウィンドウ上に保存したファイル名の通知が数秒表示されます
 
 保存先は `capture_output_dir` で指定したディレクトリ配下に、実行ごとのサブディレクトリとして作成されます。
 

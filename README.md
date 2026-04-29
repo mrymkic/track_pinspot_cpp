@@ -240,6 +240,7 @@ Windows では `aux` が予約名なので、補助カメラ側の保存フォ�
 - `base`: `calibration_images/<session>/base/0001.bmp`
 - `aux`: `calibration_images/<session>/aux_color/0001.jpg`
 - 必要なら `capture_save_aux_depth = true` で `aux_depth` も保存可能
+- 保存に成功すると、映像ウィンドウ上に `Saved 0001.bmp / 0001.jpg` の通知が数秒表示されます
 
 `<session>` には実行時刻ベースのセッション名が付きます。保存された `base` と `aux_color` のディレクトリは、そのまま `tools/calibrate_checkerboard_extrinsics.py` の入力に使えます。
 

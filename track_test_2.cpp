@@ -134,7 +134,21 @@ public:
             SetTextColor(hdc, RGB(255, 255, 0));
             DrawTextW(hdc, overlay_text_.c_str(), -1, &text_rect, DT_LEFT | DT_TOP);
         }
+        if (!status_text_.empty() && Clock::now() < status_until_) {
+            RECT status_rect{18, 54, client_w - 18, client_h - 18};
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(0, 255, 128));
+            DrawTextW(hdc, status_text_.c_str(), -1, &status_rect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        }
         ReleaseDC(hwnd_, hdc);
+    }
+
+    void show_status(
+        const std::wstring &message,
+        std::chrono::milliseconds duration = std::chrono::milliseconds(2200))
+    {
+        status_text_ = message;
+        status_until_ = Clock::now() + duration;
     }
 
 private:
@@ -142,6 +156,8 @@ private:
     int width_ = 0;
     int height_ = 0;
     std::wstring overlay_text_;
+    std::wstring status_text_;
+    Clock::time_point status_until_{};
 
     static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     {
@@ -202,6 +218,13 @@ struct ImageCaptureSession {
     fs::path aux_depth_dir;
     bool save_aux_depth = false;
     uint64_t next_index = 1;
+};
+
+struct CaptureSaveResult {
+    std::string stem;
+    fs::path base_path;
+    fs::path aux_path;
+    std::optional<fs::path> aux_depth_path;
 };
 
 std::array<double, 3> rotate_vc_y(const std::array<double, 3> &vc, double rotate_deg)
@@ -744,7 +767,7 @@ ImageCaptureSession create_image_capture_session(
     return session;
 }
 
-std::string save_capture_pair(
+CaptureSaveResult save_capture_pair(
     ImageCaptureSession &session,
     k4a_image_t base_color_image,
     k4a_image_t aux_color_image,
@@ -757,22 +780,43 @@ std::string save_capture_pair(
         throw std::runtime_error("Aux color image is not available for capture.");
     }
 
-    const std::string stem = make_capture_stem(session.next_index++);
-    const fs::path base_path = save_kinect_color_image(session.base_dir, stem, base_color_image);
-    const fs::path aux_path = save_kinect_color_image(session.aux_dir, stem, aux_color_image);
-
-    std::ostringstream oss;
-    oss << "Saved Kinect capture pair stem=" << stem
-        << " base=" << base_path.string()
-        << " aux=" << aux_path.string();
+    CaptureSaveResult result;
+    result.stem = make_capture_stem(session.next_index++);
+    result.base_path = save_kinect_color_image(session.base_dir, result.stem, base_color_image);
+    result.aux_path = save_kinect_color_image(session.aux_dir, result.stem, aux_color_image);
 
     if (session.save_aux_depth && aux_depth_image != nullptr) {
-        const fs::path depth_path = session.aux_depth_dir / (stem + ".pgm");
+        const fs::path depth_path = session.aux_depth_dir / (result.stem + ".pgm");
         save_depth16_image_as_pgm(depth_path, aux_depth_image);
-        oss << " aux_depth=" << depth_path.string();
+        result.aux_depth_path = depth_path;
     }
 
+    return result;
+}
+
+std::string format_capture_save_log_message(const CaptureSaveResult &result)
+{
+    std::ostringstream oss;
+    oss << "Saved Kinect capture pair stem=" << result.stem
+        << " base=" << result.base_path.string()
+        << " aux=" << result.aux_path.string();
+    if (result.aux_depth_path.has_value()) {
+        oss << " aux_depth=" << result.aux_depth_path->string();
+    }
     return oss.str();
+}
+
+std::wstring make_capture_status_text(const CaptureSaveResult &result)
+{
+    std::wstring text = L"Saved ";
+    text += result.base_path.filename().wstring();
+    text += L" / ";
+    text += result.aux_path.filename().wstring();
+    if (result.aux_depth_path.has_value()) {
+        text += L" / ";
+        text += result.aux_depth_path->filename().wstring();
+    }
+    return text;
 }
 
 fs::path get_runtime_log_path()
@@ -3224,14 +3268,23 @@ int main(int argc, char **argv)
                         warn_and_log("Image capture is disabled. Set enable_image_capture=true in the config.");
                     } else {
                         try {
-                            const std::string save_message = save_capture_pair(
+                            const CaptureSaveResult save_result = save_capture_pair(
                                 *image_capture_session,
                                 base_color_image,
                                 aux_color_image,
                                 aux_depth_image);
-                            info_and_log(save_message);
+                            info_and_log(format_capture_save_log_message(save_result));
+                            const std::wstring status_text = make_capture_status_text(save_result);
+                            base_image_window.show_status(status_text);
+                            if (aux_window_initialized) {
+                                aux_image_window.show_status(status_text);
+                            }
                         } catch (const std::exception &capture_error) {
                             warn_and_log(std::string("Failed to save image capture: ") + capture_error.what());
+                            base_image_window.show_status(L"Capture save failed");
+                            if (aux_window_initialized) {
+                                aux_image_window.show_status(L"Capture save failed");
+                            }
                         }
                     }
                 }
