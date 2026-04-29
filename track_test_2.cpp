@@ -1044,14 +1044,18 @@ void log_dxgi_adapters_for_body_tracking()
     }
 }
 
-std::vector<KinectDeviceIdentity> enumerate_kinect_devices(uint32_t installed_device_count)
+std::vector<KinectDeviceIdentity> enumerate_kinect_devices(
+    uint32_t installed_device_count,
+    bool suppress_open_failures = false)
 {
     std::vector<KinectDeviceIdentity> devices;
     devices.reserve(installed_device_count);
     for (uint32_t index = 0; index < installed_device_count; ++index) {
         k4a_device_t device = nullptr;
         if (k4a_device_open(index, &device) != K4A_RESULT_SUCCEEDED) {
-            warn_and_log("Failed to open Azure Kinect during enumeration (index " + std::to_string(index) + ").");
+            if (!suppress_open_failures) {
+                warn_and_log("Failed to open Azure Kinect during enumeration (index " + std::to_string(index) + ").");
+            }
             continue;
         }
 
@@ -1065,6 +1069,18 @@ std::vector<KinectDeviceIdentity> enumerate_kinect_devices(uint32_t installed_de
         k4a_device_close(device);
     }
     return devices;
+}
+
+std::optional<std::string> find_device_serial_by_index(
+    const std::vector<KinectDeviceIdentity> &devices,
+    uint32_t index)
+{
+    for (const auto &device : devices) {
+        if (device.index == index) {
+            return device.serial;
+        }
+    }
+    return std::nullopt;
 }
 
 std::optional<uint32_t> find_device_index_by_serial(
@@ -1246,12 +1262,14 @@ bool start_aux_camera_with_mode(
 }
 
 bool restart_aux_camera_with_mode(
-    uint32_t aux_device_index,
+    uint32_t fallback_aux_device_index,
+    const std::string &preferred_aux_serial,
+    uint32_t *resolved_aux_device_index_out,
     k4a_device_t *aux_device_io,
     const k4a_device_configuration_t &aux_config,
     k4a_calibration_t *aux_calibration_out)
 {
-    if (aux_device_io == nullptr || aux_calibration_out == nullptr) {
+    if (aux_device_io == nullptr || aux_calibration_out == nullptr || resolved_aux_device_index_out == nullptr) {
         return false;
     }
 
@@ -1264,14 +1282,36 @@ bool restart_aux_camera_with_mode(
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
     for (int attempt = 1; attempt <= 3; ++attempt) {
+        uint32_t open_device_index = fallback_aux_device_index;
+        if (!preferred_aux_serial.empty()) {
+            const uint32_t installed_device_count = k4a_device_get_installed_count();
+            const auto available_devices = enumerate_kinect_devices(installed_device_count, true);
+            if (!available_devices.empty()) {
+                info_and_log("Available Azure Kinect devices during aux restart: " + format_device_list(available_devices));
+            } else {
+                warn_and_log("No Azure Kinect devices were discoverable during aux restart enumeration.");
+            }
+            if (auto matched_index = find_device_index_by_serial(available_devices, preferred_aux_serial)) {
+                open_device_index = *matched_index;
+            } else {
+                warn_and_log(
+                    "Preferred auxiliary Kinect serial was not found during restart: " +
+                    preferred_aux_serial + ". Falling back to device index " +
+                    std::to_string(fallback_aux_device_index) + ".");
+            }
+        }
+
         info_and_log(
             "Attempting to restart auxiliary Kinect with mode=" +
             std::string(wired_sync_mode_to_string(aux_config.wired_sync_mode)) +
             ", synchronized_images_only=" + (aux_config.synchronized_images_only ? "true" : "false") +
+            ", target_index=" + std::to_string(open_device_index) +
             " (attempt " + std::to_string(attempt) + "/3)");
 
-        if (k4a_device_open(aux_device_index, aux_device_io) != K4A_RESULT_SUCCEEDED) {
-            warn_and_log("Failed to reopen auxiliary Kinect device.");
+        if (k4a_device_open(open_device_index, aux_device_io) != K4A_RESULT_SUCCEEDED) {
+            warn_and_log(
+                "Failed to reopen auxiliary Kinect device at index " +
+                std::to_string(open_device_index) + ".");
             *aux_device_io = nullptr;
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             continue;
@@ -1279,6 +1319,7 @@ bool restart_aux_camera_with_mode(
 
         std::string failure_stage;
         if (start_aux_camera_with_mode(*aux_device_io, aux_config, aux_calibration_out, &failure_stage)) {
+            *resolved_aux_device_index_out = open_device_index;
             return true;
         }
 
@@ -1598,6 +1639,20 @@ bool create_body_tracker_with_fallback(
     }
 
     return false;
+}
+
+void shutdown_and_destroy_tracker(
+    k4abt_tracker_t *tracker_io,
+    const std::string &tracker_label)
+{
+    if (tracker_io == nullptr || *tracker_io == nullptr) {
+        return;
+    }
+
+    info_and_log("Shutting down " + tracker_label + " body tracker.");
+    k4abt_tracker_shutdown(*tracker_io);
+    k4abt_tracker_destroy(*tracker_io);
+    *tracker_io = nullptr;
 }
 
 bool is_confident_joint(k4abt_joint_confidence_level_t confidence_level)
@@ -2164,6 +2219,9 @@ int main(int argc, char **argv)
             config.aux_kinect_serial,
             1,
             "aux");
+        uint32_t current_aux_device_index = aux_device_index;
+        std::string aux_device_serial_in_use =
+            find_device_serial_by_index(available_devices, aux_device_index).value_or(config.aux_kinect_serial);
         if (base_device_index == aux_device_index) {
             throw std::runtime_error(
                 "Base Kinect and auxiliary Kinect resolved to the same device index: " +
@@ -2254,6 +2312,45 @@ int main(int argc, char **argv)
 
         k4abt_tracker_t base_tracker = nullptr;
         k4abt_tracker_t aux_tracker = nullptr;
+        auto create_aux_tracker_if_requested = [&](bool restarted) {
+            if (!(config.enable_body_tracking &&
+                  config.enable_aux_body_tracking &&
+                  aux_camera_enabled &&
+                  aux_device != nullptr)) {
+                return;
+            }
+
+            std::string aux_tracker_mode_in_use;
+            if (!create_body_tracker_with_fallback(
+                    aux_calibration,
+                    "auxiliary",
+                    config.body_tracking_mode,
+                    config.body_tracking_gpu_device_id,
+                    body_tracking_model_path_string,
+                    &aux_tracker,
+                    &aux_tracker_mode_in_use)) {
+                warn_and_log("Failed to create auxiliary body tracker.");
+                if (restarted) {
+                    warn_and_log("Continuing with depth-only correction for the auxiliary Kinect after restart.");
+                } else {
+                    warn_and_log("Continuing with depth-only correction for the auxiliary Kinect.");
+                }
+                aux_tracker = nullptr;
+                return;
+            }
+
+            if (restarted) {
+                info_and_log("Aux body tracker recreated after auxiliary restart with mode: " + aux_tracker_mode_in_use);
+            } else {
+                info_and_log("Aux body tracker created with mode: " + aux_tracker_mode_in_use);
+            }
+            if (aux_tracker_mode_in_use != config.body_tracking_mode) {
+                warn_and_log(
+                    "Configured body_tracking_mode '" + config.body_tracking_mode +
+                    "' was unavailable for auxiliary tracking. Using fallback mode '" +
+                    aux_tracker_mode_in_use + "'.");
+            }
+        };
         if (config.enable_body_tracking) {
             const bool aux_body_tracking_requested =
                 aux_camera_enabled && config.enable_aux_body_tracking;
@@ -2278,27 +2375,7 @@ int main(int argc, char **argv)
                 }
             }
             if (aux_body_tracking_requested) {
-                std::string aux_tracker_mode_in_use;
-                if (!create_body_tracker_with_fallback(
-                        aux_calibration,
-                        "auxiliary",
-                        config.body_tracking_mode,
-                        config.body_tracking_gpu_device_id,
-                        body_tracking_model_path_string,
-                        &aux_tracker,
-                        &aux_tracker_mode_in_use)) {
-                    warn_and_log("Failed to create auxiliary body tracker.");
-                    warn_and_log("Continuing with depth-only correction for the auxiliary Kinect.");
-                    aux_tracker = nullptr;
-                } else {
-                    info_and_log("Aux body tracker created with mode: " + aux_tracker_mode_in_use);
-                    if (aux_tracker_mode_in_use != config.body_tracking_mode) {
-                        warn_and_log(
-                            "Configured body_tracking_mode '" + config.body_tracking_mode +
-                            "' was unavailable for auxiliary tracking. Using fallback mode '" +
-                            aux_tracker_mode_in_use + "'.");
-                    }
-                }
+                create_aux_tracker_if_requested(false);
             } else if (aux_camera_enabled) {
                 std::cout << "Auxiliary Kinect will use depth-only correction (no auxiliary body tracker).\n";
                 append_runtime_log("Auxiliary Kinect will use depth-only correction (no auxiliary body tracker).");
@@ -2806,47 +2883,81 @@ int main(int argc, char **argv)
                 k4a_capture_release(aux_capture);
             }
 
-            if (pending_aux_subordinate_restart && aux_device != nullptr) {
+            if (pending_aux_subordinate_restart) {
                 pending_aux_subordinate_restart = false;
                 aux_capture_pump.stop();
+                shutdown_and_destroy_tracker(&aux_tracker, "auxiliary");
+                last_aux_capture_generation_enqueued = 0;
+                last_aux_predicted_ear_2d.reset();
+                last_aux_tracked_ear_2d.reset();
                 info_and_log(
                     "Attempting to restart auxiliary Kinect while keeping subordinate sync mode "
                     "after releasing in-flight captures.");
                 if (restart_aux_camera_with_mode(
-                        aux_device_index,
+                        current_aux_device_index,
+                        aux_device_serial_in_use,
+                        &current_aux_device_index,
                         &aux_device,
                         aux_config,
                         &aux_calibration)) {
+                    aux_camera_enabled = true;
+                    create_aux_tracker_if_requested(true);
                     aux_capture_pump.start(aux_device, 100, "aux");
                     consecutive_aux_capture_failures = 0;
+                    successful_dual_capture_count = 0;
+                    consecutive_aux_alignment_failures = 0;
+                    aux_subordinate_restart_attempted = false;
+                    last_sync_sample_base_generation = 0;
+                    last_sync_sample_aux_generation = 0;
                     sync_phase_baseline_sample_count = 0;
                     sync_phase_baseline_us.reset();
                     info_and_log("Aux Kinect restarted successfully in subordinate sync mode.");
                     info_and_log("Sync baseline reset after auxiliary restart.");
                 } else {
                     warn_and_log("Failed to restart auxiliary Kinect in subordinate sync mode.");
+                    if (config.allow_aux_unsynced_fallback && !aux_unsynced_fallback_attempted) {
+                        aux_unsynced_fallback_attempted = true;
+                        pending_aux_standalone_restart = true;
+                        warn_and_log(
+                            "Scheduling auxiliary Kinect restart in standalone mode after subordinate restart failure.");
+                    } else {
+                        warn_and_log("Disabling auxiliary Kinect and continuing with base Kinect only.");
+                        aux_camera_enabled = false;
+                    }
                 }
                 continue;
             }
 
-            if (pending_aux_standalone_restart && aux_device != nullptr) {
+            if (pending_aux_standalone_restart) {
                 pending_aux_standalone_restart = false;
                 const auto standalone_aux_config = make_aux_device_config(
                     base_config,
                     true,
                     config.subordinate_delay_off_master_usec);
                 aux_capture_pump.stop();
+                shutdown_and_destroy_tracker(&aux_tracker, "auxiliary");
+                last_aux_capture_generation_enqueued = 0;
+                last_aux_predicted_ear_2d.reset();
+                last_aux_tracked_ear_2d.reset();
                 info_and_log(
                     "Attempting to restart auxiliary Kinect in standalone mode after releasing in-flight captures.");
                 if (restart_aux_camera_with_mode(
-                        aux_device_index,
+                        current_aux_device_index,
+                        aux_device_serial_in_use,
+                        &current_aux_device_index,
                         &aux_device,
                         standalone_aux_config,
                         &aux_calibration)) {
                     aux_config = standalone_aux_config;
                     aux_is_unsynced = true;
+                    aux_camera_enabled = true;
+                    create_aux_tracker_if_requested(true);
                     aux_capture_pump.start(aux_device, 100, "aux");
                     consecutive_aux_capture_failures = 0;
+                    successful_dual_capture_count = 0;
+                    consecutive_aux_alignment_failures = 0;
+                    last_sync_sample_base_generation = 0;
+                    last_sync_sample_aux_generation = 0;
                     sync_phase_baseline_sample_count = 0;
                     sync_phase_baseline_us.reset();
                     info_and_log("Aux Kinect restarted successfully in standalone mode.");
@@ -2891,14 +3002,8 @@ int main(int argc, char **argv)
             }
         }
 
-        if (base_tracker != nullptr) {
-            k4abt_tracker_shutdown(base_tracker);
-            k4abt_tracker_destroy(base_tracker);
-        }
-        if (aux_tracker != nullptr) {
-            k4abt_tracker_shutdown(aux_tracker);
-            k4abt_tracker_destroy(aux_tracker);
-        }
+        shutdown_and_destroy_tracker(&base_tracker, "base");
+        shutdown_and_destroy_tracker(&aux_tracker, "auxiliary");
 
         base_capture_pump.stop();
         aux_capture_pump.stop();
