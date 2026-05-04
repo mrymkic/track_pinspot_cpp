@@ -42,6 +42,11 @@ If you only have depth->color extrinsics, the script can also consume:
   - depth_to_color_translation_mm
 
 and will invert them internally.
+
+A plain checkerboard has a 180-degree corner-order ambiguity. If the estimated
+transform projects the base ear near a clearly wrong place in the aux view, rerun
+with --aux-corner-order reverse or --base-corner-order reverse and compare the
+resulting runtime overlay and trace metrics.
 """
 
 from __future__ import annotations
@@ -109,6 +114,8 @@ class CalibrationRunSettings:
     board_cols: int
     board_rows: int
     square_size_mm: float
+    base_corner_order: str
+    aux_corner_order: str
     output_json: Path | None
     config_in: Path | None
     config_out: Path | None
@@ -250,6 +257,14 @@ def _detect_checkerboard(gray: np.ndarray, pattern_size: tuple[int, int]) -> np.
     return corners.reshape(-1, 2).astype(np.float32)
 
 
+def _apply_corner_order(corners: np.ndarray, order: str) -> np.ndarray:
+    if order == "normal":
+        return corners
+    if order == "reverse":
+        return corners[::-1].copy()
+    raise ValueError(f"Unsupported checkerboard corner order: {order}")
+
+
 def _solve_checkerboard_pose(
     object_points: np.ndarray,
     image_points: np.ndarray,
@@ -302,6 +317,8 @@ def _estimate_aux_to_base_for_pair(
     base_calibration: CameraCalibration,
     aux_calibration: CameraCalibration,
     pattern_size: tuple[int, int],
+    base_corner_order: str,
+    aux_corner_order: str,
 ) -> PairEstimate | None:
     base_gray = _read_grayscale_image(base_image_path)
     aux_gray = _read_grayscale_image(aux_image_path)
@@ -310,6 +327,8 @@ def _estimate_aux_to_base_for_pair(
     aux_corners = _detect_checkerboard(aux_gray, pattern_size)
     if base_corners is None or aux_corners is None:
         return None
+    base_corners = _apply_corner_order(base_corners, base_corner_order)
+    aux_corners = _apply_corner_order(aux_corners, aux_corner_order)
 
     base_rot_color_board, base_t_color_board, base_reproj = _solve_checkerboard_pose(
         object_points, base_corners, base_calibration
@@ -413,6 +432,17 @@ def _parse_optional_float(value: Any, label: str) -> float | None:
         raise ValueError(f"{label} must be a number.") from exc
 
 
+def _parse_corner_order(value: Any, label: str) -> str:
+    if value is None:
+        return "normal"
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string.")
+    normalized = value.strip().lower()
+    if normalized not in {"normal", "reverse"}:
+        raise ValueError(f"{label} must be either 'normal' or 'reverse'.")
+    return normalized
+
+
 def _resolve_run_settings(args: argparse.Namespace) -> CalibrationRunSettings:
     payload: dict[str, Any] = {}
     checkerboard_payload: dict[str, Any] = {}
@@ -432,7 +462,7 @@ def _resolve_run_settings(args: argparse.Namespace) -> CalibrationRunSettings:
             return cli_value
         return _parse_optional_path_from_config(payload.get(config_key), config_dir, config_key)
 
-    def _coalesce_board_setting(cli_value: int | float | None, key: str) -> int | float | None:
+    def _coalesce_board_setting(cli_value: Any, key: str) -> Any:
         if cli_value is not None:
             return cli_value
         if key in checkerboard_payload:
@@ -450,6 +480,14 @@ def _resolve_run_settings(args: argparse.Namespace) -> CalibrationRunSettings:
     square_size_mm = _parse_optional_float(
         _coalesce_board_setting(args.square_size_mm, "square_size_mm"),
         "square_size_mm",
+    )
+    base_corner_order = _parse_corner_order(
+        _coalesce_board_setting(args.base_corner_order, "base_corner_order"),
+        "base_corner_order",
+    )
+    aux_corner_order = _parse_corner_order(
+        _coalesce_board_setting(args.aux_corner_order, "aux_corner_order"),
+        "aux_corner_order",
     )
 
     missing: list[str] = []
@@ -479,6 +517,8 @@ def _resolve_run_settings(args: argparse.Namespace) -> CalibrationRunSettings:
         board_cols=board_cols,
         board_rows=board_rows,
         square_size_mm=square_size_mm,
+        base_corner_order=base_corner_order,
+        aux_corner_order=aux_corner_order,
         output_json=output_json,
         config_in=config_in,
         config_out=config_out,
@@ -515,6 +555,16 @@ def _parse_args() -> argparse.Namespace:
         "--square-size-mm",
         type=float,
         help="Checkerboard square size in millimeters.",
+    )
+    parser.add_argument(
+        "--base-corner-order",
+        choices=("normal", "reverse"),
+        help="Corner order to use for base images. Use 'reverse' for 180-degree checkerboard ordering ambiguity.",
+    )
+    parser.add_argument(
+        "--aux-corner-order",
+        choices=("normal", "reverse"),
+        help="Corner order to use for aux images. Use 'reverse' for 180-degree checkerboard ordering ambiguity.",
     )
     parser.add_argument(
         "--output-json",
@@ -576,6 +626,8 @@ def main() -> int:
             base_calibration,
             aux_calibration,
             pattern_size,
+            settings.base_corner_order,
+            settings.aux_corner_order,
         )
         if estimate is None:
             skipped_stems.append(stem)
@@ -610,6 +662,8 @@ def main() -> int:
         "pairs_found": len(shared_stems),
         "pairs_used": len(pair_estimates),
         "pairs_skipped": skipped_stems,
+        "base_corner_order": settings.base_corner_order,
+        "aux_corner_order": settings.aux_corner_order,
         "aux_translation_mm": _round_vector(average_translation_mm),
         "rotation_matrix": _round_matrix(average_rotation),
         "translation_std_mm": _round_vector(translation_std_mm),
@@ -628,6 +682,8 @@ def main() -> int:
     print(f"  pairs found   : {len(shared_stems)}")
     print(f"  pairs used    : {len(pair_estimates)}")
     print(f"  pairs skipped : {len(skipped_stems)}")
+    print(f"  base corner order : {settings.base_corner_order}")
+    print(f"  aux corner order  : {settings.aux_corner_order}")
     print("  aux_translation_mm:")
     for value in _round_vector(average_translation_mm):
         print(f"    {value}")

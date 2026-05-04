@@ -9,7 +9,9 @@
     "checkerboard": {
         "board_cols": 9,
         "board_rows": 6,
-        "square_size_mm": 32.0
+        "square_size_mm": 32.0,
+        "base_corner_order": "normal",
+        "aux_corner_order": "normal"
     },
     "output_json": "../calibration_images/20260429_160911_337/checkerboard_result.json",
     "config_in": "../track_config_2.json",

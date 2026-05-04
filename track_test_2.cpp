@@ -186,6 +186,7 @@ struct AppConfig {
     bool enable_ptu = true;
     bool enable_body_tracking = true;
     bool enable_aux_body_tracking = false;
+    double max_aux_body_match_error_mm = 600.0;
     bool allow_aux_unsynced_fallback = false;
     int32_t capture_timeout_ms = 1000;
     int32_t body_tracking_timeout_ms = 0;
@@ -435,6 +436,11 @@ AppConfig load_config(const std::string &path)
     cfg.enable_ptu = parse_bool_optional(text, "enable_ptu", true);
     cfg.enable_body_tracking = parse_bool_optional(text, "enable_body_tracking", true);
     cfg.enable_aux_body_tracking = parse_bool_optional(text, "enable_aux_body_tracking", false);
+    cfg.max_aux_body_match_error_mm =
+        parse_number_optional(text, "max_aux_body_match_error_mm", 600.0);
+    if (cfg.max_aux_body_match_error_mm < 0.0) {
+        throw std::runtime_error("max_aux_body_match_error_mm must be non-negative.");
+    }
     cfg.allow_aux_unsynced_fallback = parse_bool_optional(text, "allow_aux_unsynced_fallback", false);
     cfg.capture_timeout_ms = static_cast<int32_t>(
         std::llround(parse_number_optional(text, "capture_timeout_ms", 1000.0)));
@@ -2023,12 +2029,12 @@ public:
 
         ofs_ << "frame_index,base_capture_generation,aux_capture_generation,"
                 "base_depth_ts_us,aux_depth_ts_us,sync_phase_us,sync_phase_error_us,"
-                "source,base_conf,aux_body_conf,base_found,aux_body_found,aux_depth_found,"
+                "source,base_conf,aux_body_conf,base_found,aux_body_found,aux_body_used,aux_depth_found,"
                 "base_x_mm,base_y_mm,base_z_mm,"
                 "aux_body_in_base_x_mm,aux_body_in_base_y_mm,aux_body_in_base_z_mm,"
                 "aux_depth_in_base_x_mm,aux_depth_in_base_y_mm,aux_depth_in_base_z_mm,"
                 "fused_x_mm,fused_y_mm,fused_z_mm,fused_minus_base_z_mm,"
-                "aux_match_err_mm,aux_reason\n";
+                "aux_body_match_err_mm,aux_match_err_mm,aux_reason\n";
         enabled_ = true;
     }
 
@@ -2054,6 +2060,8 @@ public:
         const std::optional<JointSample3D> &base_ear,
         const std::optional<JointSample3D> &aux_ear,
         const std::optional<std::array<double, 3>> &aux_body_in_base,
+        bool aux_body_used,
+        const std::optional<double> &aux_body_match_error_mm,
         const std::optional<std::array<double, 3>> &aux_depth_in_base,
         const std::optional<AuxDepthSample> &aux_depth_sample,
         const std::optional<std::array<double, 3>> &fused_ear,
@@ -2079,6 +2087,7 @@ public:
              << csv_escape(aux_ear.has_value() ? joint_confidence_to_string(aux_ear->confidence_level) : "MISSING") << ','
              << (base_ear.has_value() ? "1" : "0") << ','
              << (aux_body_in_base.has_value() ? "1" : "0") << ','
+             << (aux_body_used ? "1" : "0") << ','
              << (aux_depth_sample.has_value() ? "1" : "0") << ',';
 
         append_optional_vec3(base_ear.has_value() ? std::optional<std::array<double, 3>>(base_ear->position) : std::nullopt);
@@ -2091,6 +2100,10 @@ public:
         ofs_ << ',';
         if (fused_ear.has_value() && base_ear.has_value()) {
             append_value((*fused_ear)[2] - base_ear->position[2]);
+        }
+        ofs_ << ',';
+        if (aux_body_match_error_mm.has_value()) {
+            append_value(*aux_body_match_error_mm);
         }
         ofs_ << ',';
         if (aux_depth_sample.has_value()) {
@@ -2264,6 +2277,14 @@ std::array<double, 3> transform_base_to_aux(
     }
 
     return p_aux;
+}
+
+double distance_mm(const std::array<double, 3> &a, const std::array<double, 3> &b)
+{
+    const double dx = a[0] - b[0];
+    const double dy = a[1] - b[1];
+    const double dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 std::array<double, 3> fuse_two_points(
@@ -2651,6 +2672,7 @@ int main(int argc, char **argv)
         std::cout << "PTU enabled: " << (config.enable_ptu ? "true" : "false") << '\n';
         std::cout << "Body tracking enabled: " << (config.enable_body_tracking ? "true" : "false") << '\n';
         std::cout << "Aux body tracking enabled: " << (config.enable_aux_body_tracking ? "true" : "false") << '\n';
+        std::cout << "Max aux body match error [mm]: " << config.max_aux_body_match_error_mm << '\n';
         std::cout << "Body tracking mode: " << config.body_tracking_mode << '\n';
         std::cout << "Body tracking gpu_device_id: " << config.body_tracking_gpu_device_id << '\n';
         std::cout << "Body tracking model asset: " << config.body_tracking_model_path << '\n';
@@ -2709,6 +2731,8 @@ int main(int argc, char **argv)
             config.aux_kinect_serial,
             1,
             "aux");
+        const std::string base_device_serial_in_use =
+            find_device_serial_by_index(available_devices, base_device_index).value_or(config.base_kinect_serial);
         uint32_t current_aux_device_index = aux_device_index;
         std::string aux_device_serial_in_use =
             find_device_serial_by_index(available_devices, aux_device_index).value_or(config.aux_kinect_serial);
@@ -2717,10 +2741,19 @@ int main(int argc, char **argv)
                 "Base Kinect and auxiliary Kinect resolved to the same device index: " +
                 std::to_string(base_device_index));
         }
-        std::cout << "Base Kinect role: MASTER (device index " << base_device_index << ")" << '\n';
-        std::cout << "Aux Kinect role: SUBORDINATE (device index " << aux_device_index << ")" << '\n';
+        if ((config.base_kinect_serial.empty() || config.aux_kinect_serial.empty()) && installed_device_count >= 2) {
+            warn_and_log(
+                "Kinect serials are not fully pinned in the config. "
+                "If Windows changes device index order, checkerboard extrinsics may be applied to the wrong camera.");
+        }
+        std::cout << "Base Kinect role: MASTER (device index " << base_device_index
+                  << ", serial " << (base_device_serial_in_use.empty() ? "unknown" : base_device_serial_in_use) << ")" << '\n';
+        std::cout << "Aux Kinect role: SUBORDINATE (device index " << aux_device_index
+                  << ", serial " << (aux_device_serial_in_use.empty() ? "unknown" : aux_device_serial_in_use) << ")" << '\n';
         append_runtime_log("Base Kinect device index: " + std::to_string(base_device_index));
         append_runtime_log("Aux Kinect device index: " + std::to_string(aux_device_index));
+        append_runtime_log("Base Kinect serial in use: " + base_device_serial_in_use);
+        append_runtime_log("Aux Kinect serial in use: " + aux_device_serial_in_use);
 
         std::unique_ptr<PTUController> ptu1;
         std::unique_ptr<PTUController> ptu2;
@@ -3256,9 +3289,20 @@ int main(int argc, char **argv)
                 ? get_tracked_ear_3d_from_body_frame(aux_body_frame, config.tracked_ear)
                 : std::nullopt;
             const bool aux_ear_confident = aux_ear.has_value() && is_confident_joint(aux_ear->confidence_level);
-            auto aux_body_ear_in_base = aux_ear_confident
+            auto raw_aux_body_ear_in_base = aux_ear_confident
                 ? std::optional<std::array<double, 3>>(transform_aux_to_base(aux_ear->position, aux_tf))
                 : std::nullopt;
+            std::optional<std::array<double, 3>> aux_body_ear_in_base;
+            std::optional<double> aux_body_match_error_mm;
+            bool aux_body_rejected_by_match_gate = false;
+            if (base_ear_confident && raw_aux_body_ear_in_base.has_value()) {
+                aux_body_match_error_mm = distance_mm(base_ear->position, *raw_aux_body_ear_in_base);
+                if (*aux_body_match_error_mm <= config.max_aux_body_match_error_mm) {
+                    aux_body_ear_in_base = raw_aux_body_ear_in_base;
+                } else {
+                    aux_body_rejected_by_match_gate = true;
+                }
+            }
             auto aux_body_ear_2d = aux_ear_confident
                 ? convert_3d_to_depth_2d(aux_calibration, aux_ear->position)
                 : std::nullopt;
@@ -3321,6 +3365,12 @@ int main(int argc, char **argv)
                           << " aux_depth=" << (aux_depth_available ? "FOUND" : "MISSING")
                           << " aux_mode=" << (aux_camera_enabled ? wired_sync_mode_to_string(aux_config.wired_sync_mode) : "disabled")
                           << " source=" << fused_ear_source;
+                if (aux_body_match_error_mm.has_value()) {
+                    std::cout << " aux_body_match_err_mm=" << *aux_body_match_error_mm;
+                }
+                if (aux_body_rejected_by_match_gate) {
+                    std::cout << " aux_body_rejected=match_gate";
+                }
                 if (aux_body_ear_in_base.has_value() && fused_ear_source == "base_xy + aux_body_z") {
                     std::cout << " z_delta=" << ((*fused_ear)[2] - base_ear->position[2])
                               << " aux_body_z=" << (*aux_body_ear_in_base)[2];
@@ -3362,7 +3412,9 @@ int main(int argc, char **argv)
                     fused_ear_source,
                     base_ear,
                     aux_ear,
-                    aux_body_ear_in_base,
+                    raw_aux_body_ear_in_base,
+                    aux_body_ear_in_base.has_value(),
+                    aux_body_match_error_mm,
                     aux_depth_in_base,
                     aux_depth_sample,
                     fused_ear,

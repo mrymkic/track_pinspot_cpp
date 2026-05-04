@@ -150,3 +150,17 @@ CLI 引数と config JSON の両方に同じ項目がある場合は、CLI 引�
 - どちらの画像でもチェッカーボード全体が見えるようにしてください
 - 再投影誤差が明らかに悪いフレームは除外してください
 - このリポジトリでは `aux_translation_mm` / `rotation_matrix` をまだ調整中の値として扱っているため、config 反映後も実際の body-tracking ログで妥当性を確認してください
+
+## 片側カメラだけ耳位置が大きく外れる場合
+
+まず `track_test_cpp_2cam` の起動ログで、`Base Kinect role` / `Aux Kinect role` に出る device index と serial を確認してください。`base_kinect_serial` / `aux_kinect_serial` が空のままだと、Windows のデバイス順が変わった時に、チェッカーボードで求めた外部パラメータを逆のカメラへ適用する可能性があります。
+
+次に、通常のチェッカーボードには 180 度のコーナー順序 ambiguity があります。`aux` 側の投影位置だけが大きく外れる場合は、同じ画像セットで次のように反転指定を試してください。
+
+```bat
+python .\tools\calibrate_checkerboard_extrinsics.py ^
+  --calibration-config .\tools\checkerboard_calibration_config_template.json ^
+  --aux-corner-order reverse
+```
+
+`base` 側の順序が疑わしい場合は `--base-corner-order reverse` を使います。テンプレート JSON では `checkerboard.base_corner_order` / `checkerboard.aux_corner_order` に `normal` または `reverse` を設定できます。
