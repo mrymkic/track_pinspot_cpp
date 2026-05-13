@@ -44,6 +44,7 @@ track_test_2_runtime.log
 *.mkv
 calibration_images/
 fusion_eval/
+tools/checkerboard_rig_live.json
 
 # Python cache
 __pycache__/

@@ -15,7 +15,7 @@ p_base_depth = aux_translation_mm + rotation_matrix * p_aux_depth
 
 1. `base` カメラ側のチェッカーボード画像ディレクトリ
 2. `aux` カメラ側のチェッカーボード画像ディレクトリ
-3. `checkerboard_rig_template.json` を元に作成した rig calibration JSON
+3. 実機の Azure Kinect calibration から作成した rig calibration JSON
 4. 必要に応じて `checkerboard_calibration_config_template.json` を元に作成した calibration config JSON
 
 画像ペアはファイル名の `stem` で対応付けます。
@@ -39,6 +39,15 @@ rig calibration JSON には次の情報が必要です。
 - 各デバイスの color camera matrix
 - 各デバイスの color distortion coefficients
 - `color_to_depth_*` または `depth_to_color_*` のどちらか
+
+接続中の Azure Kinect からこの JSON を作るには、次の補助ツールを使えます。
+
+```powershell
+build_2cam_x64\export_kinect_rig_calibration.exe --output .\tools\checkerboard_rig_live.json
+```
+
+既定では `track_test_cpp_2cam` と同じ `WFOV_2X2BINNED + 720P` の calibration を base=index 0 / aux=index 1 で出力します。必要なら `--base-index` / `--aux-index` や `--base-serial` / `--aux-serial` で固定してください。
+`checkerboard_rig_template.json` は項目の見本で、実行用の値は入っていません。そのまま指定すると `color_camera_matrix looks uninitialized` で停止します。
 
 このスクリプトは次の前提で動作します。
 
@@ -99,17 +108,8 @@ Windows では `aux` が予約名なので、補助カメラ側の保存フォ�
 
 ### コマンドライン引数だけで実行する場合
 
-```bat
-python .\tools\calibrate_checkerboard_extrinsics.py ^
-  --base-dir .\calibration_images\SESSION_NAME\base ^
-  --aux-dir .\calibration_images\SESSION_NAME\aux_color ^
-  --rig-calibration .\tools\checkerboard_rig_template.json ^
-  --board-cols 9 ^
-  --board-rows 6 ^
-  --square-size-mm 25 ^
-  --output-json .\calibration_images\SESSION_NAME\checkerboard_result.json ^
-  --config-in .\track_config_2.json ^
-  --config-out .\track_config_2.json
+```powershell
+python .\tools\calibrate_checkerboard_extrinsics.py --base-dir .\calibration_images\SESSION_NAME\base --aux-dir .\calibration_images\SESSION_NAME\aux_color --rig-calibration .\tools\checkerboard_rig_live.json --board-cols 9 --board-rows 6 --square-size-mm 25 --output-json .\calibration_images\SESSION_NAME\checkerboard_result.json --config-in .\track_config_2.json --config-out .\track_config_2.json
 ```
 
 ### calibration config JSON を使う場合
@@ -118,9 +118,8 @@ python .\tools\calibrate_checkerboard_extrinsics.py ^
 
 `rig_calibration` に指定する JSON は、`checkerboard_rig_template.json` のままでは使えません。template 内の `color_camera_matrix` がゼロのままだと、このスクリプトは失敗として終了します。必ず実機の Azure Kinect calibration 値を埋めた JSON を用意してください。
 
-```bat
-python .\tools\calibrate_checkerboard_extrinsics.py ^
-  --calibration-config .\tools\checkerboard_calibration_config_template.json
+```powershell
+python .\tools\calibrate_checkerboard_extrinsics.py --calibration-config .\tools\checkerboard_calibration_config_template.json
 ```
 
 この config には次の内容をまとめて書けます。
@@ -159,10 +158,8 @@ CLI 引数と config JSON の両方に同じ項目がある場合は、CLI 引�
 
 次に、通常のチェッカーボードには 180 度のコーナー順序 ambiguity があります。`aux` 側の投影位置だけが大きく外れる場合は、同じ画像セットで次のように反転指定を試してください。
 
-```bat
-python .\tools\calibrate_checkerboard_extrinsics.py ^
-  --calibration-config .\tools\checkerboard_calibration_config_template.json ^
-  --aux-corner-order reverse
+```powershell
+python .\tools\calibrate_checkerboard_extrinsics.py --calibration-config .\tools\checkerboard_calibration_config_template.json --aux-corner-order reverse
 ```
 
 `base` 側の順序が疑わしい場合は `--base-corner-order reverse` を使います。テンプレート JSON では `checkerboard.base_corner_order` / `checkerboard.aux_corner_order` に `normal` または `reverse` を設定できます。

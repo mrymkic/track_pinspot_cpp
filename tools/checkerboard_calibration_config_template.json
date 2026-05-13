@@ -1,11 +1,12 @@
 {
     "_note": "Copy this file and edit the paths and checkerboard values before running calibrate_checkerboard_extrinsics.py.",
     "_note_capture": "If you used track_config_2_capture_images.json, point base_dir and aux_dir at calibration_images/<session>/base and calibration_images/<session>/aux_color.",
+    "_note_rig": "Generate checkerboard_rig_live.json first with build_2cam_x64/export_kinect_rig_calibration.exe, or replace rig_calibration with your own populated rig JSON.",
     "_note_paths": "Relative paths are resolved from this JSON file's directory.",
     "_note_config": "Set config_in and config_out to the same file if you want to overwrite the config used by track_test_cpp_2cam directly.",
-    "base_dir": "../calibration_images/20260429_160911_337/base",
-    "aux_dir": "../calibration_images/20260429_160911_337/aux_color",
-    "rig_calibration": "./checkerboard_rig_template.json",
+    "base_dir": "../calibration_images/SESSION_NAME/base",
+    "aux_dir": "../calibration_images/SESSION_NAME/aux_color",
+    "rig_calibration": "./checkerboard_rig_live.json",
     "checkerboard": {
         "board_cols": 9,
         "board_rows": 6,
@@ -13,7 +14,7 @@
         "base_corner_order": "normal",
         "aux_corner_order": "normal"
     },
-    "output_json": "../calibration_images/20260429_160911_337/checkerboard_result.json",
+    "output_json": "../calibration_images/SESSION_NAME/checkerboard_result.json",
     "config_in": "../track_config_2.json",
     "config_out": "../track_config_2.json"
 }

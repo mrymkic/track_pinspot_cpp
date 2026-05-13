@@ -492,5 +492,30 @@ function(add_track_target target_name source_name config_name)
     endif()
 endfunction()
 
+function(add_k4a_utility_target target_name source_name)
+    add_executable(${target_name}
+        "${CMAKE_SOURCE_DIR}/${source_name}"
+    )
+
+    target_include_directories(${target_name} PRIVATE
+        "${K4A_INCLUDE_DIR}"
+    )
+
+    target_link_libraries(${target_name} PRIVATE
+        "${K4A_LIB}"
+    )
+
+    add_custom_command(TARGET ${target_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${K4A_DLL}"
+            $<TARGET_FILE_DIR:${target_name}>/k4a.dll
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${K4A_DEPTHENGINE_DLL}"
+            $<TARGET_FILE_DIR:${target_name}>/depthengine_2_0.dll
+        COMMENT "Copying runtime dependencies for ${target_name}..."
+    )
+endfunction()
+
 add_track_target(track_test_cpp "track_test.cpp" "track_config.json")
 add_track_target(track_test_cpp_2cam "track_test_2.cpp" "track_config_2.json")
+add_k4a_utility_target(export_kinect_rig_calibration "tools/export_kinect_rig_calibration.cpp")

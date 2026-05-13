@@ -420,6 +420,16 @@ def _parse_optional_path_from_config(value: Any, config_dir: Path, label: str) -
     return path
 
 
+def _ensure_path_has_no_template_placeholder(path: Path | None, label: str) -> None:
+    if path is None:
+        return
+    if "SESSION_NAME" in path.as_posix().split("/"):
+        raise SystemExit(
+            f"{label} still contains the template placeholder `SESSION_NAME`: {path}. "
+            "Edit the calibration config JSON to point at a real capture session before running."
+        )
+
+
 def _parse_optional_int(value: Any, label: str) -> int | None:
     if value is None:
         return None
@@ -519,6 +529,10 @@ def _resolve_run_settings(args: argparse.Namespace) -> CalibrationRunSettings:
             + ", ".join(missing)
             + ". Provide them via CLI or --calibration-config."
         )
+
+    _ensure_path_has_no_template_placeholder(base_dir, "base_dir")
+    _ensure_path_has_no_template_placeholder(aux_dir, "aux_dir")
+    _ensure_path_has_no_template_placeholder(output_json, "output_json")
 
     return CalibrationRunSettings(
         base_dir=base_dir,

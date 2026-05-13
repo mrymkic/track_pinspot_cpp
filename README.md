@@ -256,6 +256,21 @@ Windows では `aux` が予約名なので、補助カメラ側の保存フォ�
 build_2cam_x64\track_test_cpp_2cam.exe track_config_2_capture_images.json
 ```
 
+撮影後は次の順でチェッカーボード外部パラメータを反映します。
+
+1. 接続中の 2 台から rig calibration JSON を書き出します。
+2. `tools/checkerboard_calibration_config_template.json` の `SESSION_NAME` を今回の撮影セッション名へ置き換えます。
+3. `calibrate_checkerboard_extrinsics.py` を実行して `track_config_2.json` を更新します。
+
+PowerShell 例:
+
+```powershell
+build_2cam_x64\export_kinect_rig_calibration.exe --output .\tools\checkerboard_rig_live.json
+python .\tools\calibrate_checkerboard_extrinsics.py --calibration-config .\tools\checkerboard_calibration_config_template.json --aux-corner-order reverse
+```
+
+`checkerboard_rig_template.json` は見本なので、そのままでは使えません。`color_camera_matrix` が 0 のままだとスクリプトは停止します。詳しい手順は [tools/checkerboard_calibration.md](tools/checkerboard_calibration.md) を参照してください。
+
 ## 統合座標の評価
 
 融合後の座標がどの程度そろっているかを確認したいときは、`track_config_2_bt_cuda_lite_dual_eval.json` を使って `track_test_cpp_2cam` を起動します。
