@@ -205,7 +205,7 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 
 これらの `track_config_2*.json` は主に起動モードの切り替え用です。`eval` は CSV 保存、`capture_images` は画像保存、`lite_dual` は lite model、のような差だけを持たせています。rig 設定そのものは共通である前提なので、`calibrate_checkerboard_extrinsics.py` で `track_config_2.json` を更新すると、同じディレクトリの関連 `track_config_2*.json` にも `aux_translation_mm` / `rotation_matrix` / Kinect serial / subordinate delay を同期します。
 - `tools/evaluate_fused_coordinates.py`
-  - 融合座標トレース CSV から、内部整合性と既知座標に対する誤差を評価するスクリプト
+  - 融合座標トレース CSV から、内部整合性と既知座標に対する `base` / `fused` 誤差を評価するスクリプト
 - `CMakeLists.txt`
   - ビルド設定と runtime DLL staging
 
@@ -322,7 +322,7 @@ python .\tools\evaluate_fused_coordinates.py --trace-csv .\fusion_eval\fusion_tr
 - `z_delta_mm`
   - fused の Z が `base` 単体よりどれだけ動いたか
 - `reference_error` / `static_target_error`
-  - 真値がある場合の絶対誤差
+  - 真値がある場合の絶対誤差。`base` と `fused` の両方、および `fused_minus_base` の改善量を見られます
 
 CSV の生データでは、次の列がチェッカーボード反映後の確認に有用です。
 

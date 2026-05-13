@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Evaluate fused coordinate traces exported by track_test_2.cpp.
+r"""Evaluate fused coordinate traces exported by track_test_2.cpp.
 
 This script reads the fusion trace CSV emitted by track_test_2.cpp and reports:
 
 1. Internal consistency metrics that do not require ground truth.
-2. Optional absolute error metrics against either:
+2. Optional absolute error metrics for both `base` and `fused` coordinates against either:
    - a static known target position, or
    - a reference CSV with timestamps and x/y/z coordinates.
 
@@ -214,7 +214,7 @@ def _match_reference(
     matches: list[tuple[TraceRow, ReferenceRow]] = []
     for trace_row in trace_rows:
         trace_timestamp = _trace_timestamp(trace_row, trace_time_col)
-        if trace_timestamp is None or trace_row.fused_xyz is None:
+        if trace_timestamp is None:
             continue
         index = bisect_left(timestamps, trace_timestamp)
         candidates: list[ReferenceRow] = []
@@ -256,6 +256,50 @@ def _error_summary_from_pairs(
         "euclidean_rmse_mm": math.sqrt(statistics.fmean([value * value for value in euclidean_errors])),
         "euclidean_p95_mm": _pctl(sorted(euclidean_errors), 0.95),
         "euclidean_max_mm": max(euclidean_errors),
+    }
+
+
+def _pairs_against_static_target(
+    rows: list[TraceRow],
+    xyz_getter: Any,
+    target_xyz: tuple[float, float, float],
+) -> list[tuple[tuple[float, float, float], tuple[float, float, float]]]:
+    pairs: list[tuple[tuple[float, float, float], tuple[float, float, float]]] = []
+    for row in rows:
+        xyz = xyz_getter(row)
+        if xyz is None:
+            continue
+        pairs.append((xyz, target_xyz))
+    return pairs
+
+
+def _pairs_from_reference_matches(
+    matches: list[tuple[TraceRow, ReferenceRow]],
+    xyz_getter: Any,
+) -> list[tuple[tuple[float, float, float], tuple[float, float, float]]]:
+    pairs: list[tuple[tuple[float, float, float], tuple[float, float, float]]] = []
+    for trace_row, reference_row in matches:
+        xyz = xyz_getter(trace_row)
+        if xyz is None:
+            continue
+        pairs.append((xyz, reference_row.xyz))
+    return pairs
+
+
+def _compare_error_summaries(
+    base_summary: dict[str, Any] | None,
+    fused_summary: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if base_summary is None or fused_summary is None:
+        return None
+    return {
+        "negative_means_fused_is_better": True,
+        "euclidean_mae_mm_delta": fused_summary["euclidean_mae_mm"] - base_summary["euclidean_mae_mm"],
+        "euclidean_rmse_mm_delta": fused_summary["euclidean_rmse_mm"] - base_summary["euclidean_rmse_mm"],
+        "euclidean_p95_mm_delta": fused_summary["euclidean_p95_mm"] - base_summary["euclidean_p95_mm"],
+        "z_axis_mae_mm_delta": fused_summary["axis_mae_mm"]["z_mm"] - base_summary["axis_mae_mm"]["z_mm"],
+        "z_axis_rmse_mm_delta": fused_summary["axis_rmse_mm"]["z_mm"] - base_summary["axis_rmse_mm"]["z_mm"],
+        "z_axis_abs_bias_mm_delta": abs(fused_summary["axis_bias_mm"]["z_mm"]) - abs(base_summary["axis_bias_mm"]["z_mm"]),
     }
 
 
@@ -405,8 +449,18 @@ def main() -> int:
 
     if args.static_target_mm is not None:
         target = tuple(args.static_target_mm)
-        pairs = [(row.fused_xyz, target) for row in fused_rows]
-        static_summary = _error_summary_from_pairs(pairs)
+        base_pairs = _pairs_against_static_target(trace_rows, lambda row: row.base_xyz, target)
+        fused_pairs = _pairs_against_static_target(trace_rows, lambda row: row.fused_xyz, target)
+        base_static_summary = _error_summary_from_pairs(base_pairs)
+        fused_static_summary = _error_summary_from_pairs(fused_pairs)
+        static_summary = {
+            "base": base_static_summary,
+            "fused": fused_static_summary,
+            "fused_minus_base": _compare_error_summaries(
+                base_static_summary,
+                fused_static_summary,
+            ),
+        }
         evaluation_payload["static_target_mm"] = list(target)
         evaluation_payload["static_target_error"] = static_summary
         print()
@@ -425,7 +479,18 @@ def main() -> int:
             args.trace_time_col,
             args.match_tolerance_us,
         )
-        reference_summary = _error_summary_from_pairs([(trace.fused_xyz, ref.xyz) for trace, ref in matches])
+        base_pairs = _pairs_from_reference_matches(matches, lambda row: row.base_xyz)
+        fused_pairs = _pairs_from_reference_matches(matches, lambda row: row.fused_xyz)
+        base_reference_summary = _error_summary_from_pairs(base_pairs)
+        fused_reference_summary = _error_summary_from_pairs(fused_pairs)
+        reference_summary = {
+            "base": base_reference_summary,
+            "fused": fused_reference_summary,
+            "fused_minus_base": _compare_error_summaries(
+                base_reference_summary,
+                fused_reference_summary,
+            ),
+        }
         evaluation_payload["reference_csv"] = str(args.reference_csv)
         evaluation_payload["trace_time_col"] = args.trace_time_col
         evaluation_payload["reference_match_count"] = len(matches)
