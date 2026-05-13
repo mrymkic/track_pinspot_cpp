@@ -116,6 +116,8 @@ python .\tools\calibrate_checkerboard_extrinsics.py ^
 
 `checkerboard_calibration_config_template.json` を編集してから、次のように実行します。
 
+`rig_calibration` に指定する JSON は、`checkerboard_rig_template.json` のままでは使えません。template 内の `color_camera_matrix` がゼロのままだと、このスクリプトは失敗として終了します。必ず実機の Azure Kinect calibration 値を埋めた JSON を用意してください。
+
 ```bat
 python .\tools\calibrate_checkerboard_extrinsics.py ^
   --calibration-config .\tools\checkerboard_calibration_config_template.json

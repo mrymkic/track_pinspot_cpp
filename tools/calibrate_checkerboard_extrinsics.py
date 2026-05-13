@@ -146,6 +146,16 @@ def _load_camera_calibration(payload: dict[str, Any], label: str) -> CameraCalib
         (3, 3),
         f"{label}.color_camera_matrix",
     )
+    fx = float(camera_matrix[0, 0])
+    fy = float(camera_matrix[1, 1])
+    cx = float(camera_matrix[0, 2])
+    cy = float(camera_matrix[1, 2])
+    if fx <= 0.0 or fy <= 0.0 or cx <= 0.0 or cy <= 0.0:
+        raise ValueError(
+            f"{label}.color_camera_matrix looks uninitialized. "
+            "Populate the rig calibration JSON with the real Azure Kinect color intrinsics "
+            "instead of leaving the checkerboard_rig_template placeholder values in place."
+        )
     distortion = np.asarray(
         payload.get("color_distortion_coeffs", payload.get("distortion_coeffs", payload.get("distortion_coefficients"))),
         dtype=np.float64,
