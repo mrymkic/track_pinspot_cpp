@@ -186,33 +186,21 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 - `track_config.json`
   - 1台版の設定
 - `track_config_2.json`
-  - 現行の推奨設定
-- `track_config_2_bt_cpu.json`
-  - CPU body tracking 診断用
-- `track_config_2_bt_cuda.json`
-  - CUDA + full model 診断用
-- `track_config_2_bt_cuda_lite.json`
-  - CUDA + lite model 診断用
-- `track_config_2_bt_cuda_dual.json`
-  - CUDA + full model で `base + aux` 同時 body tracking を試す診断用
-- `track_config_2_bt_cuda_lite_dual.json`
-  - CUDA + lite model で `base + aux` 同時 body tracking を試す診断用
+  - 現行の基準設定。チェッカーボード外部パラメータの反映先
 - `track_config_2_bt_cuda_lite_dual_eval.json`
   - CUDA + lite model の 2台同時 body tracking に加えて、融合座標の CSV トレース保存を有効にした評価用
-- `track_config_2_capture_only.json`
-  - body tracking 無効の capture-only 切り分け用
 - `track_config_2_capture_images.json`
   - チェッカーボード撮影向けの Kinect 画像キャプチャ用
-- `measure_vram_bodytracking.ps1`
-  - `nvidia-smi` ベースの VRAM サンプリング補助スクリプト
+- `archived_unused_configs_and_scripts/`
+  - 現在の運用では使っていない診断用 config と補助スクリプトの退避先
 
-これらの `track_config_2*.json` は主に起動モードの切り替え用です。`eval` は CSV 保存、`capture_images` は画像保存、`lite_dual` は lite model、のような差だけを持たせています。rig 設定そのものは共通である前提なので、`calibrate_checkerboard_extrinsics.py` で `track_config_2.json` を更新すると、同じディレクトリの関連 `track_config_2*.json` にも `aux_translation_mm` / `rotation_matrix` / Kinect serial / subordinate delay を同期します。
+現在 root に残している `track_config_2*.json` は、現行フローで使う最小集合です。`eval` は CSV 保存、`capture_images` は画像保存、`track_config_2.json` は外部パラメータの基準、という役割に絞っています。rig 設定そのものは共通である前提なので、`calibrate_checkerboard_extrinsics.py` で `track_config_2.json` を更新すると、同じディレクトリに残してある関連 `track_config_2*.json` にも `aux_translation_mm` / `rotation_matrix` / Kinect serial / subordinate delay を同期します。過去の診断用 config は `archived_unused_configs_and_scripts/` へ退避しています。
 - `tools/evaluate_fused_coordinates.py`
   - 融合座標トレース CSV から、内部整合性と既知座標に対する `base` / `fused` 誤差を評価するスクリプト
 - `CMakeLists.txt`
   - ビルド設定と runtime DLL staging
 
-`track_test_cpp_2cam` をビルドすると、上記の `track_config_2*.json` も実行ファイルの隣へコピーされます。`build_2cam_x64_dualverify` のような 2 カメラ用ビルド出力でも、評価用 config をそのまま選べます。
+`track_test_cpp_2cam` をビルドすると、上記の現行 `track_config_2*.json` だけが実行ファイルの隣へコピーされます。退避済みの診断用 config は build 出力へはコピーしません。
 
 ## ビルド
 
@@ -380,51 +368,15 @@ viewer のポインタ色は次の意味です。
 - `sample_aux_depth_point_for_base_joint()` の探索条件の最適化
 - 長時間運転時の `aux` 再起動経路の安定性
 
-## VRAM 計測
+## 退避済みファイル
 
-body tracking 時の GPU メモリ使用量を追うために、次の補助ファイルを追加しています。
+現在のチェッカーボード撮影・座標統合検証フローでは使っていない診断用 config と補助スクリプトは、`archived_unused_configs_and_scripts/` へ移しています。
 
-- `measure_vram_bodytracking.ps1`
-  - `nvidia-smi` を一定間隔でサンプリングし、CSV に保存する
-- `track_config_2_bt_cuda.json`
-  - `base` のみ、`gpu_cuda + full model`
-- `track_config_2_bt_cuda_lite.json`
-  - `base` のみ、`gpu_cuda + lite model`
-- `track_config_2_bt_cuda_dual.json`
-  - `base + aux` の2台同時 body tracking 診断用、`gpu_cuda + full model`
-- `track_config_2_bt_cuda_lite_dual.json`
-  - `base + aux` の2台同時 body tracking 診断用、`gpu_cuda + lite model`
+- 例: `measure_vram_bodytracking.ps1`
+- 例: `track_config_2_bt_cuda*.json`
+- 例: `track_config_2_capture_only.json`
 
-### 計測例
-
-1台 tracker の既定計測:
-
-```bat
-powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1
-```
-
-2台同時 tracker の lite model 計測:
-
-```bat
-powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -ConfigPath ..\track_config_2_bt_cuda_lite_dual.json -OutputCsv .\build_2cam_x64\vram_samples_dual_lite.csv
-```
-
-2台同時 tracker の full model 計測:
-
-```bat
-powershell -ExecutionPolicy Bypass -File .\measure_vram_bodytracking.ps1 -ConfigPath ..\track_config_2_bt_cuda_dual.json -OutputCsv .\build_2cam_x64\vram_samples_dual_full.csv
-```
-
-### 見るべき列
-
-- `total_memory_used_mib`
-- `delta_from_baseline_mib`
-- `gpu_util_percent`
-- `memory_util_percent`
-- `target_pid`
-- `target_process_memory_mib`
-
-この PC は WDDM 環境のため、`nvidia-smi` のプロセス別 VRAM が `N/A` や空欄になることがあります。その場合は、まず `delta_from_baseline_mib` を主指標として比較します。
+将来ふたたび使う場合は、この退避フォルダから root へ戻すか、必要に応じて参照パスを直接指定してください。
 
 ## 変更履歴
 
