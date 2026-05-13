@@ -409,6 +409,25 @@ function(add_track_target target_name source_name config_name)
         COMMENT "Copying runtime dependencies for ${target_name}..."
     )
 
+    if(config_name STREQUAL "track_config_2.json")
+        foreach(extra_config
+            track_config_2_bt_cpu.json
+            track_config_2_bt_cuda.json
+            track_config_2_bt_cuda_dual.json
+            track_config_2_bt_cuda_lite.json
+            track_config_2_bt_cuda_lite_dual.json
+            track_config_2_bt_cuda_lite_dual_eval.json
+            track_config_2_capture_images.json
+            track_config_2_capture_only.json
+        )
+            add_custom_command(TARGET ${target_name} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_SOURCE_DIR}/${extra_config}"
+                    $<TARGET_FILE_DIR:${target_name}>/${extra_config}
+            )
+        endforeach()
+    endif()
+
     if(K4ABT_MODEL_LITE)
         add_custom_command(TARGET ${target_name} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different

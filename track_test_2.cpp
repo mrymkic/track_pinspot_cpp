@@ -2911,6 +2911,8 @@ int main(int argc, char **argv)
         ImageWindow aux_image_window;
         bool base_window_initialized = false;
         bool aux_window_initialized = false;
+        constexpr auto kWindowStatusDuration = std::chrono::milliseconds(1800);
+        constexpr auto kWindowRestartStatusDuration = std::chrono::milliseconds(4200);
         const auto base_window_size = color_resolution_to_size(base_config.color_resolution);
         if (!base_image_window.create(
                 L"Base Azure Kinect [MASTER]",
@@ -2926,6 +2928,7 @@ int main(int argc, char **argv)
         base_image_window.show_bgra(base_startup_display.data());
         std::cout << "Base Azure Kinect window created." << '\n';
         append_runtime_log("Base Azure Kinect window created.");
+        std::vector<uint8_t> aux_startup_display;
         if (aux_device != nullptr) {
             const auto aux_window_size = depth_mode_to_size(aux_config.depth_mode);
             if (!aux_image_window.create(
@@ -2936,13 +2939,25 @@ int main(int argc, char **argv)
                 throw std::runtime_error("Failed to create auxiliary image window");
             }
             aux_window_initialized = true;
-            std::vector<uint8_t> aux_startup_display(
+            aux_startup_display.assign(
                 static_cast<size_t>(aux_window_size[0]) * static_cast<size_t>(aux_window_size[1]) * 4,
                 0);
             aux_image_window.show_bgra(aux_startup_display.data());
             std::cout << "Aux Azure Kinect window created." << '\n';
             append_runtime_log("Aux Azure Kinect window created.");
         }
+        const auto show_aux_window_status =
+            [&](const std::wstring &message,
+                std::chrono::milliseconds duration,
+                bool clear_to_black) {
+                if (!aux_window_initialized) {
+                    return;
+                }
+                aux_image_window.show_status(message, duration);
+                if (clear_to_black && !aux_startup_display.empty()) {
+                    aux_image_window.show_bgra(aux_startup_display.data());
+                }
+            };
 
         std::optional<ImageCaptureSession> image_capture_session;
         if (config.enable_image_capture) {
@@ -3186,6 +3201,10 @@ int main(int argc, char **argv)
                     message += " pump_timeouts=" + std::to_string(aux_pump_consecutive_timeouts);
                     message += " pump_failures=" + std::to_string(aux_pump_consecutive_failures);
                     warn_and_log(message);
+                    show_aux_window_status(
+                        L"Aux capture stalled; viewer is showing the last received depth frame.",
+                        kWindowStatusDuration,
+                        false);
                 }
                 if (!aux_sync_checklist_logged &&
                     successful_dual_capture_count == 0 &&
@@ -3203,6 +3222,13 @@ int main(int argc, char **argv)
                     consecutive_aux_capture_failures >= 5) {
                     aux_subordinate_restart_attempted = true;
                     pending_aux_subordinate_restart = true;
+                    base_image_window.show_status(
+                        L"Aux Kinect stalled; restarting subordinate stream.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux capture stalled; restarting subordinate stream...",
+                        kWindowRestartStatusDuration,
+                        false);
                     warn_and_log(
                         "Aux Kinect capture stopped after synchronization was already established. "
                         "Scheduling auxiliary Kinect restart while keeping subordinate sync mode.");
@@ -3214,6 +3240,13 @@ int main(int argc, char **argv)
                     consecutive_aux_capture_failures >= 5) {
                     aux_unsynced_fallback_attempted = true;
                     pending_aux_standalone_restart = true;
+                    base_image_window.show_status(
+                        L"Aux Kinect stalled; restarting in standalone mode.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux capture stalled; restarting in standalone mode...",
+                        kWindowRestartStatusDuration,
+                        false);
                     warn_and_log(
                         "Aux Kinect timed out repeatedly in subordinate mode. "
                         "Scheduling auxiliary Kinect restart in standalone mode.");
@@ -3565,6 +3598,10 @@ int main(int argc, char **argv)
                 last_aux_capture_generation_enqueued = 0;
                 last_aux_predicted_ear_2d.reset();
                 last_aux_tracked_ear_2d.reset();
+                show_aux_window_status(
+                    L"Restarting aux Kinect in subordinate mode...",
+                    kWindowRestartStatusDuration,
+                    true);
                 info_and_log(
                     "Attempting to restart auxiliary Kinect while keeping subordinate sync mode "
                     "after releasing in-flight captures.");
@@ -3586,6 +3623,13 @@ int main(int argc, char **argv)
                     last_sync_sample_aux_generation = 0;
                     sync_phase_baseline_sample_count = 0;
                     sync_phase_baseline_us.reset();
+                    base_image_window.show_status(
+                        L"Aux Kinect restarted; re-learning sync baseline.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux Kinect restarted; re-learning sync baseline.",
+                        kWindowRestartStatusDuration,
+                        true);
                     info_and_log("Aux Kinect restarted successfully in subordinate sync mode.");
                     info_and_log("Sync baseline reset after auxiliary restart.");
                 } else {
@@ -3593,11 +3637,25 @@ int main(int argc, char **argv)
                     if (config.allow_aux_unsynced_fallback && !aux_unsynced_fallback_attempted) {
                         aux_unsynced_fallback_attempted = true;
                         pending_aux_standalone_restart = true;
+                        base_image_window.show_status(
+                            L"Aux restart failed; falling back to standalone mode.",
+                            kWindowRestartStatusDuration);
+                        show_aux_window_status(
+                            L"Aux restart failed; trying standalone mode...",
+                            kWindowRestartStatusDuration,
+                            true);
                         warn_and_log(
                             "Scheduling auxiliary Kinect restart in standalone mode after subordinate restart failure.");
                     } else {
                         warn_and_log("Disabling auxiliary Kinect and continuing with base Kinect only.");
                         aux_camera_enabled = false;
+                        base_image_window.show_status(
+                            L"Aux Kinect disabled; continuing in base-only mode.",
+                            kWindowRestartStatusDuration);
+                        show_aux_window_status(
+                            L"Aux Kinect disabled; base-only mode.",
+                            kWindowRestartStatusDuration,
+                            true);
                     }
                 }
                 continue;
@@ -3615,6 +3673,10 @@ int main(int argc, char **argv)
                 last_aux_capture_generation_enqueued = 0;
                 last_aux_predicted_ear_2d.reset();
                 last_aux_tracked_ear_2d.reset();
+                show_aux_window_status(
+                    L"Restarting aux Kinect in standalone mode...",
+                    kWindowRestartStatusDuration,
+                    true);
                 info_and_log(
                     "Attempting to restart auxiliary Kinect in standalone mode after releasing in-flight captures.");
                 if (restart_aux_camera_with_mode(
@@ -3636,6 +3698,13 @@ int main(int argc, char **argv)
                     last_sync_sample_aux_generation = 0;
                     sync_phase_baseline_sample_count = 0;
                     sync_phase_baseline_us.reset();
+                    base_image_window.show_status(
+                        L"Aux Kinect restarted in standalone mode.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux Kinect restarted in standalone mode.",
+                        kWindowRestartStatusDuration,
+                        true);
                     info_and_log("Aux Kinect restarted successfully in standalone mode.");
                     info_and_log("Sync baseline reset after auxiliary restart.");
                 } else {
@@ -3643,6 +3712,13 @@ int main(int argc, char **argv)
                     warn_and_log("Disabling auxiliary Kinect and continuing with base Kinect only.");
                     aux_camera_enabled = false;
                     aux_device = nullptr;
+                    base_image_window.show_status(
+                        L"Aux Kinect disabled; continuing in base-only mode.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux Kinect disabled; base-only mode.",
+                        kWindowRestartStatusDuration,
+                        true);
                 }
                 continue;
             }

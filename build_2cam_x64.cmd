@@ -1,10 +1,10 @@
 @echo off
 setlocal
 
-set "ROOT=%~dp0"
+for %%I in ("%~dp0.") do set "ROOT=%%~fI"
 set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
 set "CMAKE_EXE=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-set "BUILD_DIR=%ROOT%build_2cam_x64"
+set "BUILD_DIR=%ROOT%\build_2cam_x64"
 
 if not exist "%VSDEVCMD%" (
     echo VsDevCmd.bat was not found:
@@ -24,7 +24,7 @@ if errorlevel 1 exit /b %errorlevel%
 cd /d "%ROOT%"
 
 echo [1/2] Configuring x64 Ninja build...
-"%CMAKE_EXE%" -S "%ROOT%" -B "%BUILD_DIR%" -G Ninja
+"%CMAKE_EXE%" -S "%ROOT%" -B "%BUILD_DIR%" -G Ninja --fresh
 if errorlevel 1 exit /b %errorlevel%
 
 echo [2/2] Building track_test_cpp_2cam...

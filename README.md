@@ -207,6 +207,8 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 - `CMakeLists.txt`
   - ビルド設定と runtime DLL staging
 
+`track_test_cpp_2cam` をビルドすると、上記の `track_config_2*.json` も実行ファイルの隣へコピーされます。`build_2cam_x64_dualverify` のような 2 カメラ用ビルド出力でも、評価用 config をそのまま選べます。
+
 ## ビルド
 
 Visual Studio 2022 の x64 開発環境でビルドします。
@@ -264,6 +266,8 @@ build_2cam_x64\track_test_cpp_2cam.exe track_config_2_capture_images.json
 
 この config では、実行中の各フレームについて `base` 座標、`aux` の body tracking 座標、`aux` depth 補正座標、最終的な fused 座標を CSV に保存します。
 
+`build_2cam_x64_dualverify\track_test_cpp_2cam.exe` のような 2 カメラ用ビルド出力にある exe でも確認できますが、チェッカーボード反映後の座標統合を見たい場合は、既定の `track_config_2.json` ではなく `track_config_2_bt_cuda_lite_dual_eval.json` を明示して起動してください。viewer を目視するだけでは「補助カメラの座標変換がずれている」のか「aux capture が stall して最後のフレームを表示し続けている」のかを区別できません。
+
 例:
 
 ```bat
@@ -301,6 +305,17 @@ python .\tools\evaluate_fused_coordinates.py --trace-csv .\fusion_eval\fusion_tr
 - `reference_error` / `static_target_error`
   - 真値がある場合の絶対誤差
 
+CSV の生データでは、次の列がチェッカーボード反映後の確認に有用です。
+
+- `aux_body_used`
+  - `aux` body tracking を fused 座標へ実際に使ったか。`0` が続く場合は `aux` 側が外れすぎて match gate に落ちている可能性があります
+- `aux_body_match_err_mm`
+  - `aux` body tracking を `base` 座標系へ変換した点と `base` body tracking の差。大きな値が続く場合は、チェッカーボード外部パラメータの向き違い、カメラ serial の取り違え、または人物追跡の不一致を疑ってください
+- `aux_match_err_mm`
+  - `aux_depth` 補正点の探索誤差。`aux_body_match_err_mm` と合わせて見ると、どこでずれているかを切り分けやすくなります
+
+`max_aux_body_match_error_mm` を超えた `aux` body tracking 点は fused 座標へ使わず、`aux_body_used=0` になります。チェッカーボード反映後に `source=base_xy + aux_body_z` が出ていても、`aux_body_match_err_mm` が大きいままなら外部パラメータを再確認してください。
+
 真の精度評価には、固定治具などで既知の 3D 座標を用意するか、別系統の基準計測 CSV を与える必要があります。基準なしでも、2台の一致度やフレーム間のばらつきから外部キャリブレーションの良し悪しはかなり見えます。
 
 ## 既知の注意点
@@ -310,6 +325,7 @@ python .\tools\evaluate_fused_coordinates.py --trace-csv .\fusion_eval\fusion_tr
 - `raw_delta_us` はフレーム周期の整数倍だけずれて見えることがあるので、同期確認では `phase_delta_us` / `phase_error_us` を優先して見る
 - 融合用の `aux_translation_mm` / `rotation_matrix` はまだダミーであり、`source=base_xy + aux_body_z` や `source=base_xy + aux_depth_z` が出ていても、その座標精度までは保証していない
 - `aux` stream stall 時は再起動と tracker 再生成を試みるが、USB や電源条件が悪いと再起動に失敗する可能性は残る
+- `aux` viewer が固まって見えるときは、実際には `aux capture stalled; viewer is showing the last received depth frame.` の状態で最後のフレームを再描画している場合がある。まず `track_test_2_runtime.log` の `Aux Kinect capture stopped updating...` と再起動ログを確認する
 
 ## 今後の確認事項
 
