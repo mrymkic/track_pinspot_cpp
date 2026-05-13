@@ -202,6 +202,8 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
   - チェッカーボード撮影向けの Kinect 画像キャプチャ用
 - `measure_vram_bodytracking.ps1`
   - `nvidia-smi` ベースの VRAM サンプリング補助スクリプト
+
+これらの `track_config_2*.json` は主に起動モードの切り替え用です。`eval` は CSV 保存、`capture_images` は画像保存、`lite_dual` は lite model、のような差だけを持たせています。rig 設定そのものは共通である前提なので、`calibrate_checkerboard_extrinsics.py` で `track_config_2.json` を更新すると、同じディレクトリの関連 `track_config_2*.json` にも `aux_translation_mm` / `rotation_matrix` / Kinect serial / subordinate delay を同期します。
 - `tools/evaluate_fused_coordinates.py`
   - 融合座標トレース CSV から、内部整合性と既知座標に対する誤差を評価するスクリプト
 - `CMakeLists.txt`
@@ -271,7 +273,7 @@ python .\tools\calibrate_checkerboard_extrinsics.py --calibration-config .\tools
 
 `checkerboard_rig_template.json` は見本なので、そのままでは使えません。`color_camera_matrix` が 0 のままだとスクリプトは停止します。詳しい手順は [tools/checkerboard_calibration.md](tools/checkerboard_calibration.md) を参照してください。
 
-`calibrate_checkerboard_extrinsics.py` は、各画像ペアから求めた変換の多数派だけを自動採用します。`checkerboard_result.json` の `pairs_rejected_outliers` や各 `pair_details[].included_in_final_estimate` を見ると、どの画像ペアが final estimate から外れたかを確認できます。外れ値が 0 でも `translation_std_mm` や後段の `aux_body_match_err_mm` が大きい場合は、撮影条件や corner order の見直しが必要です。
+`calibrate_checkerboard_extrinsics.py` は、各画像ペアから求めた変換の多数派だけを自動採用します。`checkerboard_result.json` の `pairs_rejected_outliers` や各 `pair_details[].included_in_final_estimate` を見ると、どの画像ペアが final estimate から外れたかを確認できます。外れ値が 0 でも `translation_std_mm` や後段の `aux_body_match_err_mm` が大きい場合は、撮影条件や corner order の見直しが必要です。`config_out` を `track_config_2.json` にして実行した場合は、評価用や capture 用を含む関連 `track_config_2*.json` にも同じ rig 値を同期します。
 
 ## 統合座標の評価
 

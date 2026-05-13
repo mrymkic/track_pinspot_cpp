@@ -143,7 +143,7 @@ def _as_float_array(data: Any, shape: tuple[int, ...], label: str) -> np.ndarray
 
 
 def _load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8-sig") as handle:
         return json.load(handle)
 
 
@@ -562,18 +562,58 @@ def _round_matrix(values: np.ndarray, digits: int = 6) -> list[list[float]]:
     return [[round(float(value), digits) for value in row] for row in values]
 
 
+def _write_json_file(path: Path, payload: Any) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=4)
+        handle.write("\n")
+
+
 def _update_config_file(
     config_in: Path,
     config_out: Path,
     translation_mm: np.ndarray,
     rotation_matrix: np.ndarray,
-) -> None:
+) -> dict[str, Any]:
     payload = _load_json(config_in)
     payload["aux_translation_mm"] = _round_vector(translation_mm)
     payload["rotation_matrix"] = _round_matrix(rotation_matrix)
-    with config_out.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=4)
-        handle.write("\n")
+    _write_json_file(config_out, payload)
+    return payload
+
+
+def _build_rig_sync_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "base_kinect_serial",
+        "aux_kinect_serial",
+        "aux_translation_mm",
+        "rotation_matrix",
+        "subordinate_delay_off_master_usec",
+    )
+    return {key: payload[key] for key in keys if key in payload}
+
+
+def _collect_related_track_config_paths(config_out: Path) -> list[Path]:
+    if config_out.name != "track_config_2.json":
+        return []
+    return sorted(
+        candidate
+        for candidate in config_out.parent.glob("track_config_2*.json")
+        if candidate.name != config_out.name
+    )
+
+
+def _sync_related_track_configs(config_out: Path, source_payload: dict[str, Any]) -> list[Path]:
+    sync_payload = _build_rig_sync_payload(source_payload)
+    updated_paths: list[Path] = []
+    for target_path in _collect_related_track_config_paths(config_out):
+        target_payload = _load_json(target_path)
+        if not isinstance(target_payload, dict):
+            raise ValueError(f"Tracking config JSON must be an object: {target_path}")
+        for key, value in sync_payload.items():
+            target_payload[key] = value
+        _write_json_file(target_path, target_payload)
+        updated_paths.append(target_path)
+    return updated_paths
 
 
 def _parse_optional_path_from_config(value: Any, config_dir: Path, label: str) -> Path | None:
@@ -963,8 +1003,18 @@ def main() -> int:
         print(f"\nWrote report JSON: {settings.output_json}")
 
     if settings.config_in is not None and settings.config_out is not None:
-        _update_config_file(settings.config_in, settings.config_out, average_translation_mm, average_rotation)
+        patched_config_payload = _update_config_file(
+            settings.config_in,
+            settings.config_out,
+            average_translation_mm,
+            average_rotation,
+        )
         print(f"Wrote patched config JSON: {settings.config_out}")
+        synced_paths = _sync_related_track_configs(settings.config_out, patched_config_payload)
+        if synced_paths:
+            print("Synced related track configs:")
+            for synced_path in synced_paths:
+                print(f"  {synced_path}")
 
     return 0
 

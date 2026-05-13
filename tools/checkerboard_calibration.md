@@ -149,6 +149,8 @@ CLI 引数と config JSON の両方に同じ項目がある場合は、CLI 引�
 
 `--config-in` と `--config-out` を指定した場合は、通常の実行で使えるように `aux_translation_mm` と `rotation_matrix` を反映した tracking config JSON もあわせて出力します。`config_out` を `track_config_2.json` にしておけば、そのまま次回の `track_test_cpp_2cam.exe` 実行から新しい外部パラメータが使われます。
 
+このリポジトリでは、`track_config_2_bt_cuda_lite_dual_eval.json` や `track_config_2_capture_images.json` のように、用途ごとに `track_config_2*.json` を分けています。これらは body tracking モデルや CSV 保存のような起動モード差分を持つための別ファイルで、rig 設定は共通です。そのため `config_out` が `track_config_2.json` のときは、同じディレクトリにある関連 `track_config_2*.json` にも `aux_translation_mm` / `rotation_matrix` / Kinect serial / subordinate delay を自動同期します。
+
 レポート JSON には、各ペアについて次の診断情報も残ります。
 
 - `included_in_final_estimate`
