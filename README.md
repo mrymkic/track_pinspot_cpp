@@ -271,6 +271,8 @@ python .\tools\calibrate_checkerboard_extrinsics.py --calibration-config .\tools
 
 `checkerboard_rig_template.json` は見本なので、そのままでは使えません。`color_camera_matrix` が 0 のままだとスクリプトは停止します。詳しい手順は [tools/checkerboard_calibration.md](tools/checkerboard_calibration.md) を参照してください。
 
+`calibrate_checkerboard_extrinsics.py` は、各画像ペアから求めた変換の多数派だけを自動採用します。`checkerboard_result.json` の `pairs_rejected_outliers` や各 `pair_details[].included_in_final_estimate` を見ると、どの画像ペアが final estimate から外れたかを確認できます。外れ値が 0 でも `translation_std_mm` や後段の `aux_body_match_err_mm` が大きい場合は、撮影条件や corner order の見直しが必要です。
+
 ## 統合座標の評価
 
 融合後の座標がどの程度そろっているかを確認したいときは、`track_config_2_bt_cuda_lite_dual_eval.json` を使って `track_test_cpp_2cam` を起動します。

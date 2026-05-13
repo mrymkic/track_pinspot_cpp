@@ -121,6 +121,20 @@ class CalibrationRunSettings:
     config_out: Path | None
 
 
+@dataclass
+class OutlierRejectionResult:
+    inlier_indices: list[int]
+    rotation_reference_index: int | None
+    rotation_threshold_deg: float | None
+    translation_threshold_mm: float | None
+    rotation_residuals_deg: list[float]
+    translation_residuals_mm: list[float]
+    rejection_reasons: list[str]
+    iterations: int
+    status: str
+    minimum_inliers: int
+
+
 def _as_float_array(data: Any, shape: tuple[int, ...], label: str) -> np.ndarray:
     array = np.asarray(data, dtype=np.float64)
     if array.shape != shape:
@@ -385,6 +399,159 @@ def _rotation_angle_deg(rotation_matrix: np.ndarray) -> float:
     cosine = (np.trace(rotation_matrix) - 1.0) * 0.5
     cosine = float(np.clip(cosine, -1.0, 1.0))
     return math.degrees(math.acos(cosine))
+
+
+def _median_absolute_deviation(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    array = np.asarray(values, dtype=np.float64)
+    median = float(np.median(array))
+    return float(np.median(np.abs(array - median)))
+
+
+def _robust_residual_threshold(
+    residuals: list[float],
+    minimum_threshold: float,
+    sigma_scale: float = 3.5,
+) -> float:
+    if not residuals:
+        return minimum_threshold
+    median = float(np.median(np.asarray(residuals, dtype=np.float64)))
+    mad = _median_absolute_deviation(residuals)
+    robust_sigma = 1.4826 * mad
+    return max(minimum_threshold, median + sigma_scale * robust_sigma)
+
+
+def _find_rotation_medoid_index(rotations: list[np.ndarray], candidate_indices: list[int]) -> int:
+    best_index = candidate_indices[0]
+    best_score = math.inf
+    for candidate_index in candidate_indices:
+        score = 0.0
+        candidate_rotation = rotations[candidate_index]
+        for other_index in candidate_indices:
+            score += _rotation_angle_deg(candidate_rotation @ rotations[other_index].T)
+        if score < best_score:
+            best_score = score
+            best_index = candidate_index
+    return best_index
+
+
+def _reject_transform_outliers(pair_estimates: list[PairEstimate]) -> OutlierRejectionResult:
+    total_pairs = len(pair_estimates)
+    all_indices = list(range(total_pairs))
+    minimum_inliers = 2 if total_pairs >= 2 else 1
+    if total_pairs < 3:
+        return OutlierRejectionResult(
+            inlier_indices=all_indices,
+            rotation_reference_index=0 if all_indices else None,
+            rotation_threshold_deg=None,
+            translation_threshold_mm=None,
+            rotation_residuals_deg=[0.0] * total_pairs,
+            translation_residuals_mm=[0.0] * total_pairs,
+            rejection_reasons=[""] * total_pairs,
+            iterations=0,
+            status="disabled_too_few_pairs",
+            minimum_inliers=minimum_inliers,
+        )
+
+    rotations = [estimate.rotation_aux_to_base for estimate in pair_estimates]
+    active_indices = all_indices[:]
+    iterations = 0
+
+    while True:
+        iterations += 1
+        rotation_reference_index = _find_rotation_medoid_index(rotations, active_indices)
+        translation_center_mm = np.median(
+            np.stack([pair_estimates[index].translation_aux_to_base_mm for index in active_indices], axis=0),
+            axis=0,
+        )
+
+        rotation_residuals_deg = [
+            _rotation_angle_deg(estimate.rotation_aux_to_base @ rotations[rotation_reference_index].T)
+            for estimate in pair_estimates
+        ]
+        translation_residuals_mm = [
+            float(np.linalg.norm(estimate.translation_aux_to_base_mm - translation_center_mm))
+            for estimate in pair_estimates
+        ]
+
+        active_rotation_residuals = [rotation_residuals_deg[index] for index in active_indices]
+        active_translation_residuals = [translation_residuals_mm[index] for index in active_indices]
+        rotation_threshold_deg = _robust_residual_threshold(active_rotation_residuals, minimum_threshold=2.0)
+        translation_threshold_mm = _robust_residual_threshold(active_translation_residuals, minimum_threshold=30.0)
+
+        new_active_indices = [
+            index
+            for index in active_indices
+            if rotation_residuals_deg[index] <= rotation_threshold_deg
+            and translation_residuals_mm[index] <= translation_threshold_mm
+        ]
+
+        if len(new_active_indices) < minimum_inliers:
+            ranked_indices = sorted(
+                active_indices,
+                key=lambda index: (
+                    (rotation_residuals_deg[index] / max(rotation_threshold_deg, 1e-6)) ** 2
+                    + (translation_residuals_mm[index] / max(translation_threshold_mm, 1e-6)) ** 2
+                ),
+            )
+            new_active_indices = ranked_indices[:minimum_inliers]
+
+        if new_active_indices == active_indices:
+            break
+        active_indices = new_active_indices
+
+    final_rotation_reference_index = _find_rotation_medoid_index(rotations, active_indices)
+    final_translation_center_mm = np.median(
+        np.stack([pair_estimates[index].translation_aux_to_base_mm for index in active_indices], axis=0),
+        axis=0,
+    )
+    final_rotation_residuals_deg = [
+        _rotation_angle_deg(estimate.rotation_aux_to_base @ rotations[final_rotation_reference_index].T)
+        for estimate in pair_estimates
+    ]
+    final_translation_residuals_mm = [
+        float(np.linalg.norm(estimate.translation_aux_to_base_mm - final_translation_center_mm))
+        for estimate in pair_estimates
+    ]
+    final_rotation_threshold_deg = _robust_residual_threshold(
+        [final_rotation_residuals_deg[index] for index in active_indices],
+        minimum_threshold=2.0,
+    )
+    final_translation_threshold_mm = _robust_residual_threshold(
+        [final_translation_residuals_mm[index] for index in active_indices],
+        minimum_threshold=30.0,
+    )
+
+    rejection_reasons: list[str] = []
+    inlier_set = set(active_indices)
+    for index in all_indices:
+        if index in inlier_set:
+            rejection_reasons.append("")
+            continue
+        reasons: list[str] = []
+        if final_rotation_residuals_deg[index] > final_rotation_threshold_deg:
+            reasons.append("rotation_outlier")
+        if final_translation_residuals_mm[index] > final_translation_threshold_mm:
+            reasons.append("translation_outlier")
+        if not reasons:
+            reasons.append("consensus_outlier")
+        rejection_reasons.append("+".join(reasons))
+
+    rejected_count = total_pairs - len(active_indices)
+    status = "applied" if rejected_count > 0 else "no_outliers_detected"
+    return OutlierRejectionResult(
+        inlier_indices=active_indices,
+        rotation_reference_index=final_rotation_reference_index,
+        rotation_threshold_deg=final_rotation_threshold_deg,
+        translation_threshold_mm=final_translation_threshold_mm,
+        rotation_residuals_deg=final_rotation_residuals_deg,
+        translation_residuals_mm=final_translation_residuals_mm,
+        rejection_reasons=rejection_reasons,
+        iterations=iterations,
+        status=status,
+        minimum_inliers=minimum_inliers,
+    )
 
 
 def _round_vector(values: np.ndarray, digits: int = 6) -> list[float]:
@@ -661,41 +828,92 @@ def main() -> int:
     if len(pair_estimates) < 1:
         raise SystemExit("Checkerboard detection failed for every image pair.")
 
-    rotation_matrices = [estimate.rotation_aux_to_base for estimate in pair_estimates]
-    translations_mm = np.stack([estimate.translation_aux_to_base_mm for estimate in pair_estimates], axis=0)
-    average_rotation = _average_rotation_matrices(rotation_matrices)
-    average_translation_mm = np.mean(translations_mm, axis=0)
-    translation_std_mm = np.std(translations_mm, axis=0)
+    outlier_rejection = _reject_transform_outliers(pair_estimates)
+    inlier_estimates = [pair_estimates[index] for index in outlier_rejection.inlier_indices]
+    if not inlier_estimates:
+        raise SystemExit("Outlier rejection removed every checkerboard pair. Capture more images and retry.")
+
+    inlier_rotation_matrices = [estimate.rotation_aux_to_base for estimate in inlier_estimates]
+    inlier_translations_mm = np.stack([estimate.translation_aux_to_base_mm for estimate in inlier_estimates], axis=0)
+    average_rotation = _average_rotation_matrices(inlier_rotation_matrices)
+    average_translation_mm = np.mean(inlier_translations_mm, axis=0)
+    translation_std_mm = np.std(inlier_translations_mm, axis=0)
+    all_detected_translations_mm = np.stack([estimate.translation_aux_to_base_mm for estimate in pair_estimates], axis=0)
+    all_detected_translation_std_mm = np.std(all_detected_translations_mm, axis=0)
 
     pair_summaries = []
-    for estimate in pair_estimates:
+    inlier_index_set = set(outlier_rejection.inlier_indices)
+    for pair_index, estimate in enumerate(pair_estimates):
         delta_rotation = estimate.rotation_aux_to_base @ average_rotation.T
         pair_summaries.append(
             {
                 "stem": estimate.stem,
                 "base_image": estimate.base_image,
                 "aux_image": estimate.aux_image,
+                "included_in_final_estimate": pair_index in inlier_index_set,
+                "rejection_reason": outlier_rejection.rejection_reasons[pair_index] or None,
                 "base_reprojection_error_px": round(estimate.base_reprojection_error_px, 6),
                 "aux_reprojection_error_px": round(estimate.aux_reprojection_error_px, 6),
                 "rotation_delta_deg_from_average": round(_rotation_angle_deg(delta_rotation), 6),
+                "rotation_residual_deg_from_consensus": round(outlier_rejection.rotation_residuals_deg[pair_index], 6),
+                "translation_residual_mm_from_consensus": round(
+                    outlier_rejection.translation_residuals_mm[pair_index],
+                    6,
+                ),
                 "translation_aux_to_base_mm": _round_vector(estimate.translation_aux_to_base_mm),
             }
         )
 
+    rejected_stems = [
+        pair_estimates[index].stem
+        for index in range(len(pair_estimates))
+        if index not in inlier_index_set
+    ]
     result_payload = {
         "pairs_found": len(shared_stems),
-        "pairs_used": len(pair_estimates),
+        "pairs_detected": len(pair_estimates),
+        "pairs_used": len(inlier_estimates),
         "pairs_skipped": skipped_stems,
+        "pairs_rejected_outliers": rejected_stems,
         "base_corner_order": settings.base_corner_order,
         "aux_corner_order": settings.aux_corner_order,
         "aux_translation_mm": _round_vector(average_translation_mm),
         "rotation_matrix": _round_matrix(average_rotation),
         "translation_std_mm": _round_vector(translation_std_mm),
+        "translation_std_mm_all_detected": _round_vector(all_detected_translation_std_mm),
+        "outlier_rejection": {
+            "status": outlier_rejection.status,
+            "iterations": outlier_rejection.iterations,
+            "minimum_inliers": outlier_rejection.minimum_inliers,
+            "rotation_reference_stem": (
+                pair_estimates[outlier_rejection.rotation_reference_index].stem
+                if outlier_rejection.rotation_reference_index is not None
+                else None
+            ),
+            "rotation_threshold_deg": (
+                round(outlier_rejection.rotation_threshold_deg, 6)
+                if outlier_rejection.rotation_threshold_deg is not None
+                else None
+            ),
+            "translation_threshold_mm": (
+                round(outlier_rejection.translation_threshold_mm, 6)
+                if outlier_rejection.translation_threshold_mm is not None
+                else None
+            ),
+        },
         "mean_base_reprojection_error_px": round(
-            float(np.mean([estimate.base_reprojection_error_px for estimate in pair_estimates])),
+            float(np.mean([estimate.base_reprojection_error_px for estimate in inlier_estimates])),
             6,
         ),
         "mean_aux_reprojection_error_px": round(
+            float(np.mean([estimate.aux_reprojection_error_px for estimate in inlier_estimates])),
+            6,
+        ),
+        "mean_base_reprojection_error_px_all_detected": round(
+            float(np.mean([estimate.base_reprojection_error_px for estimate in pair_estimates])),
+            6,
+        ),
+        "mean_aux_reprojection_error_px_all_detected": round(
             float(np.mean([estimate.aux_reprojection_error_px for estimate in pair_estimates])),
             6,
         ),
@@ -704,10 +922,19 @@ def main() -> int:
 
     print("Checkerboard extrinsic estimate")
     print(f"  pairs found   : {len(shared_stems)}")
-    print(f"  pairs used    : {len(pair_estimates)}")
+    print(f"  pairs detected: {len(pair_estimates)}")
+    print(f"  pairs used    : {len(inlier_estimates)}")
     print(f"  pairs skipped : {len(skipped_stems)}")
+    print(f"  pairs rejected: {len(rejected_stems)}")
     print(f"  base corner order : {settings.base_corner_order}")
     print(f"  aux corner order  : {settings.aux_corner_order}")
+    if rejected_stems:
+        print(f"  rejected stems    : {', '.join(rejected_stems)}")
+    print(f"  outlier rejection : {outlier_rejection.status}")
+    if outlier_rejection.rotation_threshold_deg is not None:
+        print(f"  rotation inlier threshold [deg] : {round(outlier_rejection.rotation_threshold_deg, 6)}")
+    if outlier_rejection.translation_threshold_mm is not None:
+        print(f"  translation inlier threshold [mm]: {round(outlier_rejection.translation_threshold_mm, 6)}")
     print("  aux_translation_mm:")
     for value in _round_vector(average_translation_mm):
         print(f"    {value}")
