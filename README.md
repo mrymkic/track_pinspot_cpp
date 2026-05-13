@@ -19,7 +19,10 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 - `aux` capture stall 時には、aux カメラ再起動と aux tracker 再生成を試みる
 - `gpu_cuda + dnn_model_2_0_lite_op11.onnx` が、現時点で最も安定していた構成
 - `aux` 側の骨格が取れない場面では、従来どおり depth ベース補正へフォールバックできる
-- ただし `aux_translation_mm` と `rotation_matrix` はまだダミー値であり、融合後の空間精度は未検証
+- チェッカーボード撮影から `aux_translation_mm` / `rotation_matrix` を推定し、関連する `track_config_2*.json` へ同期できる
+- `calibrate_checkerboard_extrinsics.py` では、180 度反転した別解や誤検出に備えて外れ値ペアを自動除外できる
+- 直近の `fusion_trace.csv` では、`base_vs_aux_body` 平均約 56 mm、`base_vs_aux_depth` 平均約 52 mm まで一致度が改善している
+- ただし `reference.csv` は未用意で、真値に対して `base` より `fused` がどれだけ良いかの絶対証明はまだしていない
 
 ## 背景
 
@@ -50,7 +53,7 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 
 の順で使い分ける構成に戻しています。
 
-つまり現状は、「2台同時に body tracking を動かすところまではできているが、融合用の外部パラメータはまだ仮」という段階です。
+つまり現状は、「2台同時に body tracking を動かし、チェッカーボードで更新した外部パラメータで統合まで回せているが、真値に対する絶対精度評価はまだ途中」という段階です。
 
 ## 同期について
 
@@ -313,6 +316,8 @@ python .\tools\evaluate_fused_coordinates.py --trace-csv .\fusion_eval\fusion_tr
 python .\tools\evaluate_fused_coordinates.py --trace-csv .\fusion_eval\fusion_trace.csv --reference-csv .\fusion_eval\reference.csv --reference-time-col timestamp_us --reference-x-col x_mm --reference-y-col y_mm --reference-z-col z_mm
 ```
 
+`reference.csv` は自動生成されません。別系統の基準計測がある場合に、その時系列座標を手元で用意して渡します。現時点では未用意でも、内部整合性の確認までは進められます。
+
 主に見る項目:
 
 - `cross_camera_alignment.base_vs_aux_body`
@@ -337,20 +342,41 @@ CSV の生データでは、次の列がチェッカーボード反映後の確�
 
 真の精度評価には、固定治具などで既知の 3D 座標を用意するか、別系統の基準計測 CSV を与える必要があります。基準なしでも、2台の一致度やフレーム間のばらつきから外部キャリブレーションの良し悪しはかなり見えます。
 
+現時点の実用上の判定基準は次のとおりです。
+
+- `座標統合が動いている` とみなす条件
+  - aux viewer 上で黄色ポインタと緑ポインタが耳の近くで重なって見える
+  - `source=base_xy + aux_body_z` または `source=base_xy + aux_depth_z` が継続的に出る
+  - `aux_body_match_err_mm` と `aux_match_err_mm` が数十 mm から 100 mm 前後で収まる
+- `main Kinect の深さ方向補正を証明できた` とみなす条件
+  - `--static-target-mm` または `--reference-csv` で真値を与える
+  - `static_target_error` または `reference_error` の `fused_minus_base` で、`z_axis_mae_mm_delta` / `z_axis_rmse_mm_delta` が負になる
+  - 可能なら `euclidean_mae_mm_delta` / `euclidean_rmse_mm_delta` も負になる
+
+viewer のポインタ色は次の意味です。
+
+- aux viewer の黄色
+  - `base` 側で見えた耳位置を、現在の外部パラメータで aux depth 画像へ写した予測位置
+- aux viewer の緑
+  - aux 側で実際に使えた位置。aux body tracking の耳があればそれを、なければ aux depth でサンプリングできた点を示す
+- base viewer の緑
+  - 最終的な fused ear を base color 画像へ投影した位置
+
 ## 既知の注意点
 
 - `CUDA provider probe failed ... error 1114` が出ても、その後に `Base body tracker created with mode: gpu_cuda` が出る場合は実運用上 tracker 作成に成功している
 - `subordinate_delay_off_master_usec = 160` は subordinate の color capture タイミング設定であり、ログ上の `phase_delta_us` と 1:1 に一致する値ではない
 - `raw_delta_us` はフレーム周期の整数倍だけずれて見えることがあるので、同期確認では `phase_delta_us` / `phase_error_us` を優先して見る
-- 融合用の `aux_translation_mm` / `rotation_matrix` はまだダミーであり、`source=base_xy + aux_body_z` や `source=base_xy + aux_depth_z` が出ていても、その座標精度までは保証していない
+- 融合用の `aux_translation_mm` / `rotation_matrix` はチェッカーボード推定値へ更新済みだが、真値基準の `reference.csv` はまだ無いため、絶対精度は未証明
 - `aux` stream stall 時は再起動と tracker 再生成を試みるが、USB や電源条件が悪いと再起動に失敗する可能性は残る
 - `aux` viewer が固まって見えるときは、実際には `aux capture stalled; viewer is showing the last received depth frame.` の状態で最後のフレームを再描画している場合がある。まず `track_test_2_runtime.log` の `Aux Kinect capture stopped updating...` と再起動ログを確認する
 
 ## 今後の確認事項
 
+- `reference.csv` なしでも使える、既知固定点による `--static-target-mm` 評価手順の整備
+- 可能になった段階で `reference.csv` を用いた `base` / `fused` の絶対誤差比較
 - 実人物を入れた状態で `aux_body=FOUND` と `source=base_xy + aux_body_z` が安定して出るか
 - `aux_body_z` と `aux_depth_z` のどちらが実運用で安定するか
-- `aux_translation_mm` と `rotation_matrix` を実測値に置き換えたときの精度
 - `sample_aux_depth_point_for_base_joint()` の探索条件の最適化
 - 長時間運転時の `aux` 再起動経路の安定性
 
