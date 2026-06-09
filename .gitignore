@@ -46,3 +46,4 @@ track_test_2_runtime.log
 # OS noise
 Thumbs.db
 Desktop.ini
+hardware/checkerboard_rotation_jig/stl/
