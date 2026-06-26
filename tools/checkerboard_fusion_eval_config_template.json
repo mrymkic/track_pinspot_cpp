@@ -4,11 +4,11 @@
     "_note_transform": "transform_config should usually point at track_config_2.json or another JSON containing aux_translation_mm and rotation_matrix.",
     "_note_angles": "angles_csv must map each image stem to its known checkerboard rotation angle in degrees.",
     "_note_paths": "Relative paths are resolved from this JSON file's directory.",
-    "base_dir": "../calibration_images/20260626_115213_322/base",
-    "aux_dir": "../calibration_images/20260626_115213_322/aux_color",
+    "base_dir": "../calibration_images/20260626_165055_903/base",
+    "aux_dir": "../calibration_images/20260626_165055_903/aux_color",
     "rig_calibration": "./checkerboard_rig_live.json",
     "transform_config": "../track_config_2.json",
-    "angles_csv": "../calibration_images/20260626_115213_322/angles.csv",
+    "angles_csv": "../calibration_images/20260626_165055_903/angles.csv",
     "checkerboard": {
         "board_cols": 9,
         "board_rows": 6,
@@ -25,5 +25,5 @@
         "rotation_axis": "board_y",
         "pivot_coordinate_mm": null
     },
-    "output_json": "../calibration_images/20260626_115213_322/checkerboard_fusion_eval.json"
+    "output_json": "../calibration_images/20260626_165055_903/checkerboard_fusion_eval.json"
 }
