@@ -21,8 +21,9 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 - `aux` 側の骨格が取れない場面では、従来どおり depth ベース補正へフォールバックできる
 - チェッカーボード撮影から `aux_translation_mm` / `rotation_matrix` を推定し、関連する `track_config_2*.json` へ同期できる
 - `calibrate_checkerboard_extrinsics.py` では、180 度反転した別解や誤検出に備えて外れ値ペアを自動除外できる
+- 既知角で回したチェッカーボード画像と `evaluate_checkerboard_fusion.py` により、`base` / `aux_transformed` / `fused` の深さ方向変化量を治具ベースで比較できる
 - 直近の `fusion_trace.csv` では、`base_vs_aux_body` 平均約 56 mm、`base_vs_aux_depth` 平均約 52 mm まで一致度が改善している
-- ただし `reference.csv` は未用意で、真値に対して `base` より `fused` がどれだけ良いかの絶対証明はまだしていない
+- ただし `reference.csv` は未用意で、実人物の真値に対して `base` より `fused` がどれだけ良いかの絶対証明はまだしていない
 
 ## 背景
 
@@ -117,7 +118,7 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
 - `base` と `aux` の tracker は並行稼働できている
 - `aux` 骨格が取れたときは `base_xy + aux_body_z` を使う
 - `aux` 骨格が取れないときは `base_xy + aux_depth_z` へフォールバックする
-- 融合用の `aux_translation_mm` / `rotation_matrix` はまだダミーのため、座標精度の評価はこれから
+- 融合用の `aux_translation_mm` / `rotation_matrix` はチェッカーボード推定値へ更新済みで、runtime CSV と既知角チェッカーボード回転の両方で評価を進められる
 
 ## body tracking モードの切り分け結果
 
@@ -195,8 +196,18 @@ Azure Kinect 2台を使った同期計測と、`base` / `aux` の両方で body 
   - 現在の運用では使っていない診断用 config と補助スクリプトの退避先
 
 現在 root に残している `track_config_2*.json` は、現行フローで使う最小集合です。`eval` は CSV 保存、`capture_images` は画像保存、`track_config_2.json` は外部パラメータの基準、という役割に絞っています。rig 設定そのものは共通である前提なので、`calibrate_checkerboard_extrinsics.py` で `track_config_2.json` を更新すると、同じディレクトリに残してある関連 `track_config_2*.json` にも `aux_translation_mm` / `rotation_matrix` / Kinect serial / subordinate delay を同期します。過去の診断用 config は `archived_unused_configs_and_scripts/` へ退避しています。
+- `tools/calibrate_checkerboard_extrinsics.py`
+  - チェッカーボード画像ペアから `aux depth -> base depth` の外部パラメータを推定するスクリプト
+- `tools/checkerboard_calibration.md`
+  - チェッカーボード撮影から config 反映までの詳細手順
+- `tools/evaluate_checkerboard_fusion.py`
+  - 既知角で回したチェッカーボード画像ペアから、`base` / `aux_transformed` / `fused` の深さ方向変化誤差を比較するスクリプト
+- `tools/checkerboard_fusion_evaluation.md`
+  - `evaluate_checkerboard_fusion.py` の入力CSV形式と実行手順
 - `tools/evaluate_fused_coordinates.py`
   - 融合座標トレース CSV から、内部整合性と既知座標に対する `base` / `fused` 誤差を評価するスクリプト
+- `tools/export_kinect_rig_calibration.cpp`
+  - 接続中の Kinect 実機から rig calibration JSON を書き出す補助ツール
 - `CMakeLists.txt`
   - ビルド設定と runtime DLL staging
 
@@ -220,7 +231,7 @@ cmd.exe /c ""C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Too
 - `aux`: `SUBORDINATE`
 - `enable_aux_body_tracking = true`
 - `aux` 骨格が不安定な場面では depth 補正へフォールバック
-- `aux_translation_mm` / `rotation_matrix` は仮値として扱う
+- `aux_translation_mm` / `rotation_matrix` は最新のチェッカーボード推定値を使い、更新後は評価スクリプトで再確認する
 - 同期維持のため、`aux` の color は内部的には有効
 
 ## Kinect 画像キャプチャ
@@ -306,6 +317,40 @@ python .\tools\evaluate_fused_coordinates.py --trace-csv .\fusion_eval\fusion_tr
 
 `reference.csv` は自動生成されません。別系統の基準計測がある場合に、その時系列座標を手元で用意して渡します。現時点では未用意でも、内部整合性の確認までは進められます。
 
+チェッカーボード回転の治具評価をしたい場合は、`tools/evaluate_checkerboard_fusion.py` を使います。これは `評価手法/kinect深度座標精度の評価手法（補足）.pdf` の方針に合わせて、既知角で回したチェッカーボード画像ペアから理論深度変化量を作り、`base` / `aux_transformed` / `fused` を比較するスクリプトです。
+
+必要な入力:
+
+- `base` / `aux_color` のチェッカーボード画像ディレクトリ
+- `tools/checkerboard_rig_live.json` のような rig calibration JSON
+- `track_config_2.json` のような `aux_translation_mm` / `rotation_matrix` を持つ JSON
+- 各画像 stem と角度を対応付けた CSV
+
+テンプレート JSON を使う例:
+
+```powershell
+python .\tools\evaluate_checkerboard_fusion.py --evaluation-config .\tools\checkerboard_fusion_eval_config_template.json
+```
+
+角度 CSV を直接渡す例:
+
+```powershell
+python .\tools\evaluate_checkerboard_fusion.py --base-dir .\calibration_images\SESSION_NAME\base --aux-dir .\calibration_images\SESSION_NAME\aux_color --rig-calibration .\tools\checkerboard_rig_live.json --transform-config .\track_config_2.json --angles-csv .\calibration_images\SESSION_NAME\angles.csv --board-cols 9 --board-rows 6 --square-size-mm 32 --aux-corner-order reverse --reference-stem 0001 --rotation-axis board_y --output-json .\calibration_images\SESSION_NAME\checkerboard_fusion_eval.json
+```
+
+主に見る項目:
+
+- `overall.base.z_change_error_mm`
+  - `base` 単体で見た理論深度変化とのずれ
+- `overall.aux_transformed.z_change_error_mm`
+  - `aux` を `base` 座標系へ移した後の深度変化誤差
+- `overall.fused.z_change_error_mm`
+  - 統合後の深度変化誤差
+- `overall.fused_minus_base`
+  - `base` に対して `fused` がどれだけ改善したか
+
+`fused` は `z` に `aux_transformed.z` をそのまま使うため、深度だけを見る指標は `aux_transformed` と同じ値になります。差が出るのは `x, y` を含めた 3D 誤差です。詳しい手順は [tools/checkerboard_fusion_evaluation.md](tools/checkerboard_fusion_evaluation.md) を参照してください。
+
 主に見る項目:
 
 - `cross_camera_alignment.base_vs_aux_body`
@@ -355,13 +400,13 @@ viewer のポインタ色は次の意味です。
 - `CUDA provider probe failed ... error 1114` が出ても、その後に `Base body tracker created with mode: gpu_cuda` が出る場合は実運用上 tracker 作成に成功している
 - `subordinate_delay_off_master_usec = 160` は subordinate の color capture タイミング設定であり、ログ上の `phase_delta_us` と 1:1 に一致する値ではない
 - `raw_delta_us` はフレーム周期の整数倍だけずれて見えることがあるので、同期確認では `phase_delta_us` / `phase_error_us` を優先して見る
-- 融合用の `aux_translation_mm` / `rotation_matrix` はチェッカーボード推定値へ更新済みだが、真値基準の `reference.csv` はまだ無いため、絶対精度は未証明
+- 融合用の `aux_translation_mm` / `rotation_matrix` はチェッカーボード推定値へ更新済みだが、実人物の真値基準 `reference.csv` はまだ無いため、絶対精度は未証明
 - `aux` stream stall 時は再起動と tracker 再生成を試みるが、USB や電源条件が悪いと再起動に失敗する可能性は残る
 - `aux` viewer が固まって見えるときは、実際には `aux capture stalled; viewer is showing the last received depth frame.` の状態で最後のフレームを再描画している場合がある。まず `track_test_2_runtime.log` の `Aux Kinect capture stopped updating...` と再起動ログを確認する
 
 ## 今後の確認事項
 
-- `reference.csv` なしでも使える、既知固定点による `--static-target-mm` 評価手順の整備
+- 既知角チェッカーボード評価で、実験ごとの `angles.csv` と結果 JSON を蓄積し、`fused_minus_base` の傾向を見やすくする
 - 可能になった段階で `reference.csv` を用いた `base` / `fused` の絶対誤差比較
 - 実人物を入れた状態で `aux_body=FOUND` と `source=base_xy + aux_body_z` が安定して出るか
 - `aux_body_z` と `aux_depth_z` のどちらが実運用で安定するか
@@ -384,6 +429,16 @@ viewer のポインタ色は次の意味です。
 
 | Date | Commit | Summary |
 | --- | --- | --- |
+| 2026-06-26 | `7af2675` | 既知角で回したチェッカーボード画像から、`base` / `aux_transformed` / `fused` の深さ方向変化を比較する `evaluate_checkerboard_fusion.py` と関連ドキュメントを追加。 |
+| 2026-05-13 | `4a32b68` | 現行フローで使わない診断用 config と補助スクリプトを `archived_unused_configs_and_scripts/` へ退避し、root を最小構成へ整理。 |
+| 2026-05-13 | `625958d` | README を現状に合わせて更新し、キャリブレーション・評価・注意点の整理を反映。 |
+| 2026-05-13 | `98f6ac8` | `evaluate_fused_coordinates.py` が `fused` だけでなく `base` も真値比較できるよう拡張し、改善量を直接比較可能にした。 |
+| 2026-05-13 | `da88f7f` | `track_config_2.json` 更新時に、関連する `track_config_2*.json` へ rig 値を自動同期するよう修正。 |
+| 2026-05-13 | `358789c` | チェッカーボード外部パラメータ推定に外れ値除外を追加し、180 度別解や誤検出の混入に強くした。 |
+| 2026-05-13 | `684f7ff` | 接続中の Azure Kinect 実機から rig calibration JSON を書き出す `export_kinect_rig_calibration.cpp` を追加。 |
+| 2026-05-13 | `338ff7e` | 未初期化の `checkerboard_rig_template.json` を誤って本番入力に使った場合に、キャリブレーションを停止する安全策を追加。 |
+| 2026-04-29 | `d5bfb41` | `fusion_trace.csv` の保存と `evaluate_fused_coordinates.py` による内部整合性評価フローを追加。 |
+| 2026-04-29 | `d39d41a` | `track_test_2.cpp` にチェッカーボード画像キャプチャ機能を追加し、`base` / `aux_color` の画像ペア保存を可能にした。 |
 | 2026-04-29 | `209fb32` | `aux` capture stall 後の再起動で、serial 再解決・カメラ再初期化・aux tracker 再生成まで行うよう修正。 |
 | 2026-04-29 | `3dca973` | `aux` tracker も capture generation 単位で進めるよう修正し、`base_xy + aux_body_z` を優先する 2台同時 body tracking を既定構成へ反映。 |
 | 2026-04-28 | `1105d31` | `aux_depth=MISSING` 時に、投影失敗・探索窓内の depth 欠損・3D 候補不足・空間誤差超過などの理由をログへ出す診断を追加。 |
