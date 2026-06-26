@@ -376,7 +376,7 @@ python .\tools\evaluate_checkerboard_fusion.py --base-dir .\calibration_images\S
 
 このフローは「校正に使った画像でそのまま評価しない」ため、座標統合の良し悪しを切り分けやすいです。さらに runtime の実人物テストをするときは、その後に `track_config_2_bt_cuda_lite_dual_eval.json` で `fusion_trace.csv` を取り、`evaluate_fused_coordinates.py` を回します。
 
-実測例は [tools/checkerboard_fusion_eval_report_20260626_165055_903.md](tools/checkerboard_fusion_eval_report_20260626_165055_903.md) にまとめています。
+実測例は [tools/checkerboard_fusion_eval_report_20260626_173537_705.md](tools/checkerboard_fusion_eval_report_20260626_173537_705.md) にまとめています。
 
 主に見る項目:
 
