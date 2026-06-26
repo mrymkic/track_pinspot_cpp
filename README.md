@@ -351,6 +351,23 @@ python .\tools\evaluate_checkerboard_fusion.py --base-dir .\calibration_images\S
 
 `fused` は `z` に `aux_transformed.z` をそのまま使うため、深度だけを見る指標は `aux_transformed` と同じ値になります。差が出るのは `x, y` を含めた 3D 誤差です。詳しい手順は [tools/checkerboard_fusion_evaluation.md](tools/checkerboard_fusion_evaluation.md) を参照してください。
 
+### 校正から回転評価までの最短フロー
+
+校正用と評価用を分ける場合は、次の順が最も分かりやすいです。
+
+1. 校正用セッションを撮影する。`track_config_2_capture_images.json` で複数姿勢のチェッカーボード画像を保存する。
+2. `tools/checkerboard_calibration_config_template.json` の `base_dir` / `aux_dir` / `output_json` を校正用セッションへ向ける。
+3. `build_2cam_x64\export_kinect_rig_calibration.exe --output .\tools\checkerboard_rig_live.json` を実行する。
+4. `python .\tools\calibrate_checkerboard_extrinsics.py --calibration-config .\tools\checkerboard_calibration_config_template.json` を実行し、`track_config_2.json` へ `aux_translation_mm` / `rotation_matrix` を反映する。
+5. 評価用セッションを別で撮影する。回転治具で既知角ごとに保存し、`angles.csv` を作る。
+6. `tools/checkerboard_fusion_eval_config_template.json` の `base_dir` / `aux_dir` / `angles_csv` / `output_json` を評価用セッションへ向け、`square_size_mm` と corner order を実験条件に合わせる。
+7. `python .\tools\evaluate_checkerboard_fusion.py --evaluation-config .\tools\checkerboard_fusion_eval_config_template.json` を実行する。
+8. `checkerboard_fusion_eval.json` の `overall.fused_minus_base` を見て、`z_change_rmse_mm_delta` や `absolute_3d_rmse_mm_delta` が負になるか確認する。
+
+このフローは「校正に使った画像でそのまま評価しない」ため、座標統合の良し悪しを切り分けやすいです。さらに runtime の実人物テストをするときは、その後に `track_config_2_bt_cuda_lite_dual_eval.json` で `fusion_trace.csv` を取り、`evaluate_fused_coordinates.py` を回します。
+
+実測例は [tools/checkerboard_fusion_eval_report_20260626_115213_322.md](tools/checkerboard_fusion_eval_report_20260626_115213_322.md) にまとめています。
+
 主に見る項目:
 
 - `cross_camera_alignment.base_vs_aux_body`
