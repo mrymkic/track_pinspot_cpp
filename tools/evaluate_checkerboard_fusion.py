@@ -91,6 +91,14 @@ class CheckerboardObservation:
     aux_translation_depth_board_mm: Any
 
 
+@dataclass
+class EvaluatedFrame:
+    observation: CheckerboardObservation
+    base_points: Any
+    aux_transformed_points: Any
+    fused_points: Any
+
+
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8-sig") as handle:
         return json.load(handle)
@@ -416,6 +424,19 @@ def _board_axis_rotation_matrix(rotation_axis: str, angle_rad: float) -> Any:
     )
 
 
+def _rotated_object_points(
+    object_points: Any,
+    angle_deg: float,
+    rotation_axis: str,
+    pivot_coordinate_mm: float,
+) -> Any:
+    np = checkerboard.np
+    local_rotation = _board_axis_rotation_matrix(rotation_axis, math.radians(angle_deg))
+    pivot = np.zeros(3, dtype=np.float64)
+    pivot[0 if rotation_axis == "board_y" else 1] = pivot_coordinate_mm
+    return (local_rotation @ (object_points - pivot).T).T + pivot
+
+
 def _expected_points_from_reference(
     reference_observation: CheckerboardObservation,
     object_points: Any,
@@ -423,12 +444,12 @@ def _expected_points_from_reference(
     rotation_axis: str,
     pivot_coordinate_mm: float,
 ) -> Any:
-    np = checkerboard.np
-    delta_angle_rad = math.radians(angle_deg - reference_observation.angle_deg)
-    local_rotation = _board_axis_rotation_matrix(rotation_axis, delta_angle_rad)
-    pivot = np.zeros(3, dtype=np.float64)
-    pivot[0 if rotation_axis == "board_y" else 1] = pivot_coordinate_mm
-    rotated_local_points = (local_rotation @ (object_points - pivot).T).T + pivot
+    rotated_local_points = _rotated_object_points(
+        object_points,
+        angle_deg - reference_observation.angle_deg,
+        rotation_axis,
+        pivot_coordinate_mm,
+    )
     return _points_from_pose(
         reference_observation.base_rotation_depth_board,
         reference_observation.base_translation_depth_board_mm,
@@ -478,6 +499,20 @@ def _magnitude_summary(values: list[float]) -> dict[str, float] | None:
     }
 
 
+def _signed_error_summary_deg(values: list[float]) -> dict[str, float] | None:
+    if not values:
+        return None
+    abs_values = sorted(abs(value) for value in values)
+    return {
+        "count": len(values),
+        "bias_deg": statistics.fmean(values),
+        "mae_deg": statistics.fmean(abs(value) for value in values),
+        "rmse_deg": math.sqrt(statistics.fmean(value * value for value in values)),
+        "p95_abs_deg": _pctl(abs_values, 0.95),
+        "max_abs_deg": abs_values[-1],
+    }
+
+
 def _point_error_summary(
     observed_points: Any,
     reference_observed_points: Any,
@@ -502,6 +537,326 @@ def _point_error_summary(
         "absolute_3d_error_mm": absolute_3d_errors,
     }
     return payload, arrays
+
+
+def _apply_rigid_transform(points: Any, rotation_matrix: Any, translation_mm: Any) -> Any:
+    return (rotation_matrix @ points.T).T + translation_mm.reshape(1, 3)
+
+
+def _invert_rigid_transform(points: Any, rotation_matrix: Any, translation_mm: Any) -> Any:
+    return (rotation_matrix.T @ (points - translation_mm.reshape(1, 3)).T).T
+
+
+def _fit_rigid_transform(source_points: Any, target_points: Any) -> tuple[Any, Any]:
+    np = checkerboard.np
+    source_centroid = source_points.mean(axis=0)
+    target_centroid = target_points.mean(axis=0)
+    source_centered = source_points - source_centroid
+    target_centered = target_points - target_centroid
+    covariance = source_centered.T @ target_centered
+    u_matrix, _, vt_matrix = np.linalg.svd(covariance)
+    rotation_matrix = vt_matrix.T @ u_matrix.T
+    if np.linalg.det(rotation_matrix) < 0.0:
+        vt_matrix[-1, :] *= -1.0
+        rotation_matrix = vt_matrix.T @ u_matrix.T
+    translation_mm = target_centroid - rotation_matrix @ source_centroid
+    return rotation_matrix, translation_mm
+
+
+def _wrap_angle_deg(angle_deg: float) -> float:
+    wrapped = (angle_deg + 180.0) % 360.0 - 180.0
+    if wrapped == -180.0:
+        return 180.0
+    return wrapped
+
+
+def _label_points(frame: EvaluatedFrame, label: str) -> Any:
+    if label == "base":
+        return frame.base_points
+    if label == "aux_transformed":
+        return frame.aux_transformed_points
+    if label == "fused":
+        return frame.fused_points
+    raise KeyError(f"Unknown label: {label}")
+
+
+def _fit_global_label_pose(
+    frames: list[EvaluatedFrame],
+    label: str,
+    object_points: Any,
+    rotation_axis: str,
+    pivot_coordinate_mm: float,
+) -> tuple[Any, Any]:
+    np = checkerboard.np
+    modeled_points: list[Any] = []
+    observed_points: list[Any] = []
+    for frame in frames:
+        modeled_points.append(
+            _rotated_object_points(
+                object_points,
+                frame.observation.angle_deg,
+                rotation_axis,
+                pivot_coordinate_mm,
+            )
+        )
+        observed_points.append(_label_points(frame, label))
+    return _fit_rigid_transform(
+        np.concatenate(modeled_points, axis=0),
+        np.concatenate(observed_points, axis=0),
+    )
+
+
+def _estimate_angle_from_local_points(
+    local_points: Any,
+    object_points: Any,
+    rotation_axis: str,
+    pivot_coordinate_mm: float,
+) -> float:
+    np = checkerboard.np
+    if rotation_axis == "board_y":
+        offsets = object_points[:, 0] - pivot_coordinate_mm
+        observed_primary = local_points[:, 0] - pivot_coordinate_mm
+        observed_depth = local_points[:, 2]
+        sine = -float(np.dot(offsets, observed_depth))
+    else:
+        offsets = object_points[:, 1] - pivot_coordinate_mm
+        observed_primary = local_points[:, 1] - pivot_coordinate_mm
+        observed_depth = local_points[:, 2]
+        sine = float(np.dot(offsets, observed_depth))
+
+    denominator = float(np.dot(offsets, offsets))
+    if denominator <= 1e-12:
+        raise ValueError("Cannot estimate angle because the rotation axis offsets are degenerate.")
+
+    cosine = float(np.dot(offsets, observed_primary))
+    cosine /= denominator
+    sine /= denominator
+    scale = math.hypot(cosine, sine)
+    if scale > 1e-12:
+        cosine /= scale
+        sine /= scale
+    return math.degrees(math.atan2(sine, cosine))
+
+
+def _compare_rigid_fit_summaries(
+    baseline: dict[str, Any] | None,
+    candidate: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if baseline is None or candidate is None:
+        return None
+    return {
+        "negative_means_candidate_is_better": True,
+        "absolute_z_rmse_mm_delta": (
+            candidate["absolute_z_error_mm"]["rmse_mm"] - baseline["absolute_z_error_mm"]["rmse_mm"]
+        ),
+        "absolute_3d_rmse_mm_delta": (
+            candidate["absolute_3d_error_mm"]["rmse_mm"] - baseline["absolute_3d_error_mm"]["rmse_mm"]
+        ),
+    }
+
+
+def _compare_angle_summaries(
+    baseline: dict[str, Any] | None,
+    candidate: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if baseline is None or candidate is None:
+        return None
+    return {
+        "negative_means_candidate_is_better": True,
+        "angle_mae_deg_delta": candidate["angle_error_deg"]["mae_deg"] - baseline["angle_error_deg"]["mae_deg"],
+        "angle_rmse_deg_delta": candidate["angle_error_deg"]["rmse_deg"] - baseline["angle_error_deg"]["rmse_deg"],
+        "reconstructed_3d_rmse_mm_delta": (
+            candidate["reconstructed_3d_error_mm"]["rmse_mm"]
+            - baseline["reconstructed_3d_error_mm"]["rmse_mm"]
+        ),
+    }
+
+
+def _build_rigid_fit_summary(
+    frames: list[EvaluatedFrame],
+    object_points: Any,
+    rotation_axis: str,
+    pivot_coordinate_mm: float,
+    fit_transforms: dict[str, tuple[Any, Any]],
+) -> dict[str, Any]:
+    labels = ("base", "aux_transformed", "fused")
+    aggregate_errors: dict[str, dict[str, list[float]]] = {
+        label: {
+            "absolute_z_error_mm": [],
+            "absolute_3d_error_mm": [],
+        }
+        for label in labels
+    }
+    per_stem_payloads: list[dict[str, Any]] = []
+
+    for frame in frames:
+        modeled_points = _rotated_object_points(
+            object_points,
+            frame.observation.angle_deg,
+            rotation_axis,
+            pivot_coordinate_mm,
+        )
+        stem_payload: dict[str, Any] = {
+            "stem": frame.observation.stem,
+            "angle_deg": frame.observation.angle_deg,
+        }
+        for label in labels:
+            rotation_matrix, translation_mm = fit_transforms[label]
+            expected_points = _apply_rigid_transform(modeled_points, rotation_matrix, translation_mm)
+            observed_points = _label_points(frame, label)
+            absolute_z_errors = (observed_points[:, 2] - expected_points[:, 2]).tolist()
+            absolute_3d_errors = checkerboard.np.linalg.norm(observed_points - expected_points, axis=1).tolist()
+            stem_payload[label] = {
+                "corner_count": len(absolute_z_errors),
+                "absolute_z_error_mm": _signed_error_summary(absolute_z_errors),
+                "absolute_3d_error_mm": _magnitude_summary(absolute_3d_errors),
+            }
+            aggregate_errors[label]["absolute_z_error_mm"].extend(absolute_z_errors)
+            aggregate_errors[label]["absolute_3d_error_mm"].extend(absolute_3d_errors)
+        per_stem_payloads.append(stem_payload)
+
+    payload: dict[str, Any] = {
+        "method": (
+            "Known-angle rigid-fit evaluation. A single board pose at angle 0 is fitted per label "
+            "using all frames, so no observed sensor is privileged as the reference frame."
+        ),
+        "by_stem": per_stem_payloads,
+    }
+    for label in labels:
+        rotation_matrix, translation_mm = fit_transforms[label]
+        payload[label] = {
+            "fit_rotation_matrix": rotation_matrix.tolist(),
+            "fit_translation_mm": translation_mm.tolist(),
+            "absolute_z_error_mm": _signed_error_summary(aggregate_errors[label]["absolute_z_error_mm"]),
+            "absolute_3d_error_mm": _magnitude_summary(aggregate_errors[label]["absolute_3d_error_mm"]),
+        }
+    payload["fused_minus_base"] = _compare_rigid_fit_summaries(payload["base"], payload["fused"])
+    payload["fused_minus_aux_transformed"] = _compare_rigid_fit_summaries(
+        payload["aux_transformed"],
+        payload["fused"],
+    )
+    return payload
+
+
+def _build_angle_only_summary(
+    frames: list[EvaluatedFrame],
+    object_points: Any,
+    rotation_axis: str,
+    pivot_coordinate_mm: float,
+    fit_transforms: dict[str, tuple[Any, Any]],
+    reference_stem: str,
+    reference_angle_deg: float,
+) -> dict[str, Any]:
+    labels = ("base", "aux_transformed", "fused")
+    aggregate_errors: dict[str, dict[str, list[float]]] = {
+        label: {
+            "angle_error_deg": [],
+            "reconstructed_3d_error_mm": [],
+        }
+        for label in labels
+    }
+    raw_estimated_angles_by_stem: dict[str, dict[str, float]] = {label: {} for label in labels}
+
+    for frame in frames:
+        for label in labels:
+            rotation_matrix, translation_mm = fit_transforms[label]
+            observed_points = _label_points(frame, label)
+            local_points = _invert_rigid_transform(observed_points, rotation_matrix, translation_mm)
+            raw_estimated_angles_by_stem[label][frame.observation.stem] = _estimate_angle_from_local_points(
+                local_points,
+                object_points,
+                rotation_axis,
+                pivot_coordinate_mm,
+            )
+
+    reference_raw_angles = {
+        label: raw_estimated_angles_by_stem[label][reference_stem]
+        for label in labels
+    }
+    angle_direction_by_label: dict[str, float] = {}
+    for label in labels:
+        best_direction = 1.0
+        best_score = float("inf")
+        for direction in (1.0, -1.0):
+            errors: list[float] = []
+            for frame in frames:
+                raw_delta_deg = _wrap_angle_deg(
+                    raw_estimated_angles_by_stem[label][frame.observation.stem] - reference_raw_angles[label]
+                )
+                estimated_angle_deg = reference_angle_deg + direction * raw_delta_deg
+                errors.append(_wrap_angle_deg(estimated_angle_deg - frame.observation.angle_deg))
+            score = statistics.fmean(error * error for error in errors)
+            if score < best_score:
+                best_score = score
+                best_direction = direction
+        angle_direction_by_label[label] = best_direction
+    per_stem_payloads: list[dict[str, Any]] = []
+
+    for frame in frames:
+        stem_payload: dict[str, Any] = {
+            "stem": frame.observation.stem,
+            "angle_deg": frame.observation.angle_deg,
+        }
+        for label in labels:
+            rotation_matrix, translation_mm = fit_transforms[label]
+            observed_points = _label_points(frame, label)
+            raw_estimated_angle_deg = raw_estimated_angles_by_stem[label][frame.observation.stem]
+            raw_delta_deg = _wrap_angle_deg(raw_estimated_angle_deg - reference_raw_angles[label])
+            estimated_angle_deg = reference_angle_deg + angle_direction_by_label[label] * raw_delta_deg
+            angle_error_deg = _wrap_angle_deg(estimated_angle_deg - frame.observation.angle_deg)
+            reconstructed_points = _apply_rigid_transform(
+                _rotated_object_points(
+                    object_points,
+                    raw_estimated_angle_deg,
+                    rotation_axis,
+                    pivot_coordinate_mm,
+                ),
+                rotation_matrix,
+                translation_mm,
+            )
+            reconstructed_3d_errors = checkerboard.np.linalg.norm(
+                observed_points - reconstructed_points,
+                axis=1,
+            ).tolist()
+            stem_payload[label] = {
+                "raw_estimated_angle_deg": raw_estimated_angle_deg,
+                "estimated_angle_deg": estimated_angle_deg,
+                "angle_error_deg": angle_error_deg,
+                "reconstructed_3d_error_mm": _magnitude_summary(reconstructed_3d_errors),
+            }
+            aggregate_errors[label]["angle_error_deg"].append(angle_error_deg)
+            aggregate_errors[label]["reconstructed_3d_error_mm"].extend(reconstructed_3d_errors)
+        per_stem_payloads.append(stem_payload)
+
+    payload: dict[str, Any] = {
+        "method": (
+            "Angle-only evaluation. After the global rigid-fit pose is estimated per label, each frame's "
+            "rotation angle is re-estimated from the observed board shape. Because absolute angle has an "
+            "unidentifiable constant offset, each label is aligned so that its own reference_stem matches the "
+            "known reference angle."
+        ),
+        "reference_stem": reference_stem,
+        "reference_angle_deg": reference_angle_deg,
+        "reference_raw_angle_deg_by_label": reference_raw_angles,
+        "angle_direction_by_label": angle_direction_by_label,
+        "by_stem": per_stem_payloads,
+    }
+    for label in labels:
+        rotation_matrix, translation_mm = fit_transforms[label]
+        payload[label] = {
+            "fit_rotation_matrix": rotation_matrix.tolist(),
+            "fit_translation_mm": translation_mm.tolist(),
+            "angle_error_deg": _signed_error_summary_deg(aggregate_errors[label]["angle_error_deg"]),
+            "reconstructed_3d_error_mm": _magnitude_summary(
+                aggregate_errors[label]["reconstructed_3d_error_mm"]
+            ),
+        }
+    payload["fused_minus_base"] = _compare_angle_summaries(payload["base"], payload["fused"])
+    payload["fused_minus_aux_transformed"] = _compare_angle_summaries(
+        payload["aux_transformed"],
+        payload["fused"],
+    )
+    return payload
 
 
 def _compare_measurement_summaries(
@@ -724,6 +1079,30 @@ def main() -> int:
         aux_translation_mm,
     )
     reference_fused_points = _fuse_points(reference_base_points, reference_aux_points_in_base)
+    evaluated_frames: list[EvaluatedFrame] = []
+    for observation in observations:
+        base_points = _points_from_pose(
+            observation.base_rotation_depth_board,
+            observation.base_translation_depth_board_mm,
+            object_points,
+        )
+        aux_points_in_base = _transform_points_to_base(
+            _points_from_pose(
+                observation.aux_rotation_depth_board,
+                observation.aux_translation_depth_board_mm,
+                object_points,
+            ),
+            aux_rotation_matrix,
+            aux_translation_mm,
+        )
+        evaluated_frames.append(
+            EvaluatedFrame(
+                observation=observation,
+                base_points=base_points,
+                aux_transformed_points=aux_points_in_base,
+                fused_points=_fuse_points(base_points, aux_points_in_base),
+            )
+        )
 
     aggregate_errors: dict[str, dict[str, list[float]]] = {
         "base": {
@@ -745,7 +1124,8 @@ def main() -> int:
     per_stem_payloads: list[dict[str, Any]] = []
     expected_reference_points = reference_base_points
 
-    for observation in observations:
+    for frame in evaluated_frames:
+        observation = frame.observation
         expected_points = _expected_points_from_reference(
             reference_observation,
             object_points,
@@ -753,22 +1133,6 @@ def main() -> int:
             settings.rotation_axis,
             pivot_coordinate_mm,
         )
-
-        base_points = _points_from_pose(
-            observation.base_rotation_depth_board,
-            observation.base_translation_depth_board_mm,
-            object_points,
-        )
-        aux_points_in_base = _transform_points_to_base(
-            _points_from_pose(
-                observation.aux_rotation_depth_board,
-                observation.aux_translation_depth_board_mm,
-                object_points,
-            ),
-            aux_rotation_matrix,
-            aux_translation_mm,
-        )
-        fused_points = _fuse_points(base_points, aux_points_in_base)
 
         stem_payload: dict[str, Any] = {
             "stem": observation.stem,
@@ -782,9 +1146,9 @@ def main() -> int:
         }
 
         for label, observed_points, reference_points in (
-            ("base", base_points, reference_base_points),
-            ("aux_transformed", aux_points_in_base, reference_aux_points_in_base),
-            ("fused", fused_points, reference_fused_points),
+            ("base", frame.base_points, reference_base_points),
+            ("aux_transformed", frame.aux_transformed_points, reference_aux_points_in_base),
+            ("fused", frame.fused_points, reference_fused_points),
         ):
             summary, arrays = _point_error_summary(
                 observed_points,
@@ -814,6 +1178,32 @@ def main() -> int:
         overall_summary["aux_transformed"],
         overall_summary["fused"],
     )
+    fit_transforms = {
+        label: _fit_global_label_pose(
+            evaluated_frames,
+            label,
+            object_points,
+            settings.rotation_axis,
+            pivot_coordinate_mm,
+        )
+        for label in ("base", "aux_transformed", "fused")
+    }
+    rigid_fit_summary = _build_rigid_fit_summary(
+        evaluated_frames,
+        object_points,
+        settings.rotation_axis,
+        pivot_coordinate_mm,
+        fit_transforms,
+    )
+    angle_only_summary = _build_angle_only_summary(
+        evaluated_frames,
+        object_points,
+        settings.rotation_axis,
+        pivot_coordinate_mm,
+        fit_transforms,
+        reference_observation.stem,
+        reference_observation.angle_deg,
+    )
 
     evaluation_payload = {
         "base_dir": str(settings.base_dir),
@@ -835,6 +1225,18 @@ def main() -> int:
         "reference_angle_deg": reference_observation.angle_deg,
         "overall": overall_summary,
         "by_stem": per_stem_payloads,
+        "base_anchored": {
+            "method": (
+                "Legacy base-anchored evaluation. The theoretical board coordinates are generated "
+                "from the reference base pose, so base is implicitly privileged."
+            ),
+            "reference_stem": reference_observation.stem,
+            "reference_angle_deg": reference_observation.angle_deg,
+            "overall": overall_summary,
+            "by_stem": per_stem_payloads,
+        },
+        "rigid_fit": rigid_fit_summary,
+        "angle_only": angle_only_summary,
     }
 
     print("Checkerboard Fusion Evaluation")
@@ -850,9 +1252,13 @@ def main() -> int:
     print(f"- rotation_axis: {settings.rotation_axis}")
     print(f"- pivot_coordinate_mm: {pivot_coordinate_mm:.3f}")
     print()
-    _print_summary("Overall Error Summary", overall_summary)
+    _print_summary("Base-Anchored Error Summary (Legacy)", overall_summary)
     print()
-    print("Per-stem depth-change RMSE [mm]")
+    _print_summary("Rigid-Fit Summary", rigid_fit_summary)
+    print()
+    _print_summary("Angle-Only Summary", angle_only_summary)
+    print()
+    print("Per-stem base-anchored depth-change RMSE [mm]")
     for stem_payload in per_stem_payloads:
         print(
             "  - "
@@ -860,6 +1266,26 @@ def main() -> int:
             f"base={stem_payload['base']['z_change_error_mm']['rmse_mm']:.3f}, "
             f"aux_transformed={stem_payload['aux_transformed']['z_change_error_mm']['rmse_mm']:.3f}, "
             f"fused={stem_payload['fused']['z_change_error_mm']['rmse_mm']:.3f}"
+        )
+    print()
+    print("Per-stem angle estimate error [deg]")
+    for stem_payload in angle_only_summary["by_stem"]:
+        print(
+            "  - "
+            f"{stem_payload['stem']} angle={stem_payload['angle_deg']:.3f}: "
+            f"base={stem_payload['base']['angle_error_deg']:.3f}, "
+            f"aux_transformed={stem_payload['aux_transformed']['angle_error_deg']:.3f}, "
+            f"fused={stem_payload['fused']['angle_error_deg']:.3f}"
+        )
+    print()
+    print("Per-stem rigid-fit 3D RMSE [mm]")
+    for stem_payload in rigid_fit_summary["by_stem"]:
+        print(
+            "  - "
+            f"{stem_payload['stem']} angle={stem_payload['angle_deg']:.3f}: "
+            f"base={stem_payload['base']['absolute_3d_error_mm']['rmse_mm']:.3f}, "
+            f"aux_transformed={stem_payload['aux_transformed']['absolute_3d_error_mm']['rmse_mm']:.3f}, "
+            f"fused={stem_payload['fused']['absolute_3d_error_mm']['rmse_mm']:.3f}"
         )
 
     if settings.output_json is not None:
