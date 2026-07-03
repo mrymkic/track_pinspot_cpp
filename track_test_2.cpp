@@ -196,6 +196,7 @@ struct AppConfig {
     int32_t body_tracking_gpu_device_id = 0;
     std::string body_tracking_model_path = "dnn_model_2_0_op11.onnx";
     std::string tracked_ear = "left";
+    std::string fusion_mode = "depth_only";
     // Aux Kinect relative position [mm] in base Kinect coordinates.
     std::array<double, 3> aux_translation_mm{};
     std::array<std::array<double, 3>, 3> aux_rotation_matrix{{
@@ -316,6 +317,27 @@ std::string normalize_body_tracking_mode(std::string value)
     }
     throw std::runtime_error(
         "Invalid body_tracking_mode. Use 'gpu', 'cpu', 'gpu_cuda', 'gpu_tensorrt', or 'gpu_directml'.");
+}
+
+std::string normalize_fusion_mode(std::string value)
+{
+    value = to_lower_ascii(value);
+    if (value.empty() ||
+        value == "depth_only" ||
+        value == "depth" ||
+        value == "fused" ||
+        value == "fused_depth_only") {
+        return "depth_only";
+    }
+    if (value == "full_3d" ||
+        value == "full" ||
+        value == "pointcloud" ||
+        value == "point_cloud" ||
+        value == "full_pointcloud" ||
+        value == "full_point_cloud") {
+        return "full_3d";
+    }
+    throw std::runtime_error("Invalid fusion_mode. Use 'depth_only' or 'full_3d'.");
 }
 
 std::array<double, 3> parse_array3_values(const std::string &values_text, const std::string &key)
@@ -454,6 +476,7 @@ AppConfig load_config(const std::string &path)
     cfg.body_tracking_model_path =
         parse_string_optional(text, "body_tracking_model_path", "dnn_model_2_0_op11.onnx");
     cfg.tracked_ear = normalize_tracked_ear(parse_string_optional(text, "tracked_ear", "left"));
+    cfg.fusion_mode = normalize_fusion_mode(parse_string_optional(text, "fusion_mode", "depth_only"));
 
     cfg.aux_translation_mm = parse_array3(text, "aux_translation_mm");
     cfg.use_aux_x_as_base_z = parse_bool_optional(text, "use_aux_x_as_base_z", true);
@@ -2287,7 +2310,7 @@ double distance_mm(const std::array<double, 3> &a, const std::array<double, 3> &
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-std::array<double, 3> fuse_two_points(
+std::array<double, 3> fuse_depth_only_points(
     const std::array<double, 3> &p1,
     const std::array<double, 3> &p2)
 {
@@ -2677,6 +2700,13 @@ int main(int argc, char **argv)
         std::cout << "Body tracking gpu_device_id: " << config.body_tracking_gpu_device_id << '\n';
         std::cout << "Body tracking model asset: " << config.body_tracking_model_path << '\n';
         std::cout << "Tracked ear: " << config.tracked_ear << '\n';
+        std::cout << "Fusion mode: " << config.fusion_mode;
+        if (config.fusion_mode == "depth_only") {
+            std::cout << " (base x/y + aux z)";
+        } else {
+            std::cout << " (use transformed aux 3D point when available)";
+        }
+        std::cout << '\n';
         std::cout << "Aux depth correction: enabled when auxiliary depth is available\n";
         std::cout << "Aux stream mode: app uses depth-only; color stays enabled internally for wired sync\n";
         std::cout << "Aux synchronized_images_only: "
@@ -3360,11 +3390,21 @@ int main(int argc, char **argv)
             std::optional<std::array<double, 3>> fused_ear;
             std::string fused_ear_source;
             if (base_ear_confident && aux_body_ear_in_base.has_value()) {
-                fused_ear = fuse_two_points(base_ear->position, *aux_body_ear_in_base);
-                fused_ear_source = "base_xy + aux_body_z";
+                if (config.fusion_mode == "full_3d") {
+                    fused_ear = *aux_body_ear_in_base;
+                    fused_ear_source = "aux_body_in_base_3d";
+                } else {
+                    fused_ear = fuse_depth_only_points(base_ear->position, *aux_body_ear_in_base);
+                    fused_ear_source = "base_xy + aux_body_z";
+                }
             } else if (base_ear_confident && aux_depth_available) {
-                fused_ear = fuse_two_points(base_ear->position, *aux_depth_in_base);
-                fused_ear_source = "base_xy + aux_depth_z";
+                if (config.fusion_mode == "full_3d") {
+                    fused_ear = *aux_depth_in_base;
+                    fused_ear_source = "aux_depth_in_base_3d";
+                } else {
+                    fused_ear = fuse_depth_only_points(base_ear->position, *aux_depth_in_base);
+                    fused_ear_source = "base_xy + aux_depth_z";
+                }
             } else if (base_ear_confident) {
                 fused_ear = base_ear->position;
                 fused_ear_source = "base_only";
@@ -3404,7 +3444,8 @@ int main(int argc, char **argv)
                 if (aux_body_rejected_by_match_gate) {
                     std::cout << " aux_body_rejected=match_gate";
                 }
-                if (aux_body_ear_in_base.has_value() && fused_ear_source == "base_xy + aux_body_z") {
+                if (aux_body_ear_in_base.has_value() &&
+                    (fused_ear_source == "base_xy + aux_body_z" || fused_ear_source == "aux_body_in_base_3d")) {
                     std::cout << " z_delta=" << ((*fused_ear)[2] - base_ear->position[2])
                               << " aux_body_z=" << (*aux_body_ear_in_base)[2];
                 } else if (aux_depth_sample.has_value()) {

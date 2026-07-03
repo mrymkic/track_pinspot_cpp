@@ -35,6 +35,7 @@
     "body_tracking_gpu_device_id": 0,
     "body_tracking_model_path": "dnn_model_2_0_lite_op11.onnx",
     "tracked_ear": "right",
+    "fusion_mode": "depth_only",
     "capture_timeout_ms": 1000,
     "body_tracking_timeout_ms": 0,
     "base_kinect_serial": "",
