@@ -63,5 +63,8 @@
         ]
     ],
     "subordinate_delay_off_master_usec": 160,
-    "enable_aux_body_tracking": true
+    "enable_aux_body_tracking": true,
+    "enable_fusion_trace_csv": true,
+    "fusion_trace_csv_path": "fusion_eval/fusion_trace.csv",
+    "max_aux_body_match_error_mm": 600
 }

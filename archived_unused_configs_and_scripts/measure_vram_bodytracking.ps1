@@ -1,13 +1,24 @@
 param(
-    [string]$ExePath = '.\build_2cam_x64\track_test_cpp_2cam.exe',
-    [string]$ConfigPath = '..\track_config_2_bt_cuda_lite.json',
-    [string]$OutputCsv = '.\build_2cam_x64\vram_samples.csv',
+    [string]$ExePath = '',
+    [string]$ConfigPath = '',
+    [string]$OutputCsv = '',
     [int]$SampleMs = 1000,
     [switch]$NoLaunch
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $ExePath) {
+    $ExePath = Join-Path $scriptRoot '..\build_2cam_x64\track_test_cpp_2cam.exe'
+}
+if (-not $ConfigPath) {
+    $ConfigPath = Join-Path $scriptRoot 'track_config_2_bt_cuda_lite.json'
+}
+if (-not $OutputCsv) {
+    $OutputCsv = Join-Path $scriptRoot '..\build_2cam_x64\vram_samples.csv'
+}
 
 function Convert-ToNullableInt {
     param(

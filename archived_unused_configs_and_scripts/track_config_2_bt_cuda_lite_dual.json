@@ -35,33 +35,33 @@
     "body_tracking_gpu_device_id": 0,
     "body_tracking_model_path": "dnn_model_2_0_lite_op11.onnx",
     "tracked_ear": "right",
-    "fusion_mode": "depth_only",
     "capture_timeout_ms": 1000,
     "body_tracking_timeout_ms": 0,
     "base_kinect_serial": "",
     "aux_kinect_serial": "",
     "aux_translation_mm": [
-        864.858331,
-        12.776112,
-        388.477163
+        543.847407,
+        -45.738631,
+        218.675082
     ],
     "rotation_matrix": [
         [
-            -0.010918,
-            0.078567,
-            -0.996849
+            0.144162,
+            0.051933,
+            -0.98819
         ],
         [
-            -0.121728,
-            0.98939,
-            0.079312
+            -0.102114,
+            0.994071,
+            0.037345
         ],
         [
-            0.992503,
-            0.122211,
-            -0.001238
+            0.984271,
+            0.095524,
+            0.14861
         ]
     ],
     "subordinate_delay_off_master_usec": 160,
-    "enable_aux_body_tracking": true
+    "enable_aux_body_tracking": true,
+    "max_aux_body_match_error_mm": 600
 }

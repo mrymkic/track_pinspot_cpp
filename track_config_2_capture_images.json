@@ -29,11 +29,14 @@
     "update_interval": 0,
     "pt_factor": 3600,
     "enable_ptu": false,
-    "enable_body_tracking": true,
+    "enable_body_tracking": false,
+    "enable_image_capture": true,
+    "capture_output_dir": "calibration_images",
+    "capture_save_aux_depth": false,
+    "aux_synchronized_images_only": true,
     "allow_aux_unsynced_fallback": false,
-    "body_tracking_mode": "gpu_cuda",
+    "body_tracking_mode": "gpu_directml",
     "body_tracking_gpu_device_id": 0,
-    "body_tracking_model_path": "dnn_model_2_0_lite_op11.onnx",
     "tracked_ear": "right",
     "fusion_mode": "depth_only",
     "capture_timeout_ms": 1000,
@@ -62,6 +65,5 @@
             -0.001238
         ]
     ],
-    "subordinate_delay_off_master_usec": 160,
-    "enable_aux_body_tracking": true
+    "subordinate_delay_off_master_usec": 160
 }

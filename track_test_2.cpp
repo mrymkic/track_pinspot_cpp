@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <fstream>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <cstring>
 #include <memory>
@@ -22,6 +23,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <ctime>
 #include <vector>
 #include <array>
 
@@ -132,7 +134,21 @@ public:
             SetTextColor(hdc, RGB(255, 255, 0));
             DrawTextW(hdc, overlay_text_.c_str(), -1, &text_rect, DT_LEFT | DT_TOP);
         }
+        if (!status_text_.empty() && Clock::now() < status_until_) {
+            RECT status_rect{18, 54, client_w - 18, client_h - 18};
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(0, 255, 128));
+            DrawTextW(hdc, status_text_.c_str(), -1, &status_rect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        }
         ReleaseDC(hwnd_, hdc);
+    }
+
+    void show_status(
+        const std::wstring &message,
+        std::chrono::milliseconds duration = std::chrono::milliseconds(2200))
+    {
+        status_text_ = message;
+        status_until_ = Clock::now() + duration;
     }
 
 private:
@@ -140,6 +156,8 @@ private:
     int width_ = 0;
     int height_ = 0;
     std::wstring overlay_text_;
+    std::wstring status_text_;
+    Clock::time_point status_until_{};
 
     static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     {
@@ -168,6 +186,7 @@ struct AppConfig {
     bool enable_ptu = true;
     bool enable_body_tracking = true;
     bool enable_aux_body_tracking = false;
+    double max_aux_body_match_error_mm = 600.0;
     bool allow_aux_unsynced_fallback = false;
     int32_t capture_timeout_ms = 1000;
     int32_t body_tracking_timeout_ms = 0;
@@ -177,6 +196,7 @@ struct AppConfig {
     int32_t body_tracking_gpu_device_id = 0;
     std::string body_tracking_model_path = "dnn_model_2_0_op11.onnx";
     std::string tracked_ear = "left";
+    std::string fusion_mode = "depth_only";
     // Aux Kinect relative position [mm] in base Kinect coordinates.
     std::array<double, 3> aux_translation_mm{};
     std::array<std::array<double, 3>, 3> aux_rotation_matrix{{
@@ -187,6 +207,28 @@ struct AppConfig {
     // Legacy fallback for older config files without rotation_matrix.
     bool use_aux_x_as_base_z = true;
     uint32_t subordinate_delay_off_master_usec = 160;
+    bool aux_synchronized_images_only = false;
+    bool enable_image_capture = false;
+    std::string capture_output_dir = "calibration_images";
+    bool capture_save_aux_depth = false;
+    bool enable_fusion_trace_csv = false;
+    std::string fusion_trace_csv_path = "fusion_eval/fusion_trace.csv";
+};
+
+struct ImageCaptureSession {
+    fs::path session_dir;
+    fs::path base_dir;
+    fs::path aux_dir;
+    fs::path aux_depth_dir;
+    bool save_aux_depth = false;
+    uint64_t next_index = 1;
+};
+
+struct CaptureSaveResult {
+    std::string stem;
+    fs::path base_path;
+    fs::path aux_path;
+    std::optional<fs::path> aux_depth_path;
 };
 
 std::array<double, 3> rotate_vc_y(const std::array<double, 3> &vc, double rotate_deg)
@@ -275,6 +317,27 @@ std::string normalize_body_tracking_mode(std::string value)
     }
     throw std::runtime_error(
         "Invalid body_tracking_mode. Use 'gpu', 'cpu', 'gpu_cuda', 'gpu_tensorrt', or 'gpu_directml'.");
+}
+
+std::string normalize_fusion_mode(std::string value)
+{
+    value = to_lower_ascii(value);
+    if (value.empty() ||
+        value == "depth_only" ||
+        value == "depth" ||
+        value == "fused" ||
+        value == "fused_depth_only") {
+        return "depth_only";
+    }
+    if (value == "full_3d" ||
+        value == "full" ||
+        value == "pointcloud" ||
+        value == "point_cloud" ||
+        value == "full_pointcloud" ||
+        value == "full_point_cloud") {
+        return "full_3d";
+    }
+    throw std::runtime_error("Invalid fusion_mode. Use 'depth_only' or 'full_3d'.");
 }
 
 std::array<double, 3> parse_array3_values(const std::string &values_text, const std::string &key)
@@ -395,6 +458,11 @@ AppConfig load_config(const std::string &path)
     cfg.enable_ptu = parse_bool_optional(text, "enable_ptu", true);
     cfg.enable_body_tracking = parse_bool_optional(text, "enable_body_tracking", true);
     cfg.enable_aux_body_tracking = parse_bool_optional(text, "enable_aux_body_tracking", false);
+    cfg.max_aux_body_match_error_mm =
+        parse_number_optional(text, "max_aux_body_match_error_mm", 600.0);
+    if (cfg.max_aux_body_match_error_mm < 0.0) {
+        throw std::runtime_error("max_aux_body_match_error_mm must be non-negative.");
+    }
     cfg.allow_aux_unsynced_fallback = parse_bool_optional(text, "allow_aux_unsynced_fallback", false);
     cfg.capture_timeout_ms = static_cast<int32_t>(
         std::llround(parse_number_optional(text, "capture_timeout_ms", 1000.0)));
@@ -408,6 +476,7 @@ AppConfig load_config(const std::string &path)
     cfg.body_tracking_model_path =
         parse_string_optional(text, "body_tracking_model_path", "dnn_model_2_0_op11.onnx");
     cfg.tracked_ear = normalize_tracked_ear(parse_string_optional(text, "tracked_ear", "left"));
+    cfg.fusion_mode = normalize_fusion_mode(parse_string_optional(text, "fusion_mode", "depth_only"));
 
     cfg.aux_translation_mm = parse_array3(text, "aux_translation_mm");
     cfg.use_aux_x_as_base_z = parse_bool_optional(text, "use_aux_x_as_base_z", true);
@@ -420,6 +489,12 @@ AppConfig load_config(const std::string &path)
     }
     cfg.subordinate_delay_off_master_usec = static_cast<uint32_t>(
         std::llround(parse_number_optional(text, "subordinate_delay_off_master_usec", 160.0)));
+    cfg.aux_synchronized_images_only = parse_bool_optional(text, "aux_synchronized_images_only", false);
+    cfg.enable_image_capture = parse_bool_optional(text, "enable_image_capture", false);
+    cfg.capture_output_dir = parse_string_optional(text, "capture_output_dir", "calibration_images");
+    cfg.capture_save_aux_depth = parse_bool_optional(text, "capture_save_aux_depth", false);
+    cfg.enable_fusion_trace_csv = parse_bool_optional(text, "enable_fusion_trace_csv", false);
+    cfg.fusion_trace_csv_path = parse_string_optional(text, "fusion_trace_csv_path", "fusion_eval/fusion_trace.csv");
 
     return cfg;
 }
@@ -496,6 +571,285 @@ fs::path resolve_asset_path(const std::string &raw_path, const fs::path &config_
     }
     oss << "\n)";
     throw std::runtime_error(oss.str());
+}
+
+fs::path resolve_output_path(const std::string &raw_path, const fs::path &config_path)
+{
+    const fs::path input_path(raw_path);
+    if (input_path.is_absolute()) {
+        return input_path.lexically_normal();
+    }
+    return (config_path.parent_path() / input_path).lexically_normal();
+}
+
+std::string make_capture_session_name()
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+    const std::time_t current_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time{};
+    localtime_s(&local_time, &current_time);
+
+    std::ostringstream oss;
+    oss << std::put_time(&local_time, "%Y%m%d_%H%M%S")
+        << '_' << std::setw(3) << std::setfill('0') << millis.count();
+    return oss.str();
+}
+
+std::string make_capture_stem(uint64_t index)
+{
+    std::ostringstream oss;
+    oss << std::setw(4) << std::setfill('0') << index;
+    return oss.str();
+}
+
+void write_u16_le(std::ostream &os, uint16_t value)
+{
+    const char bytes[2] = {
+        static_cast<char>(value & 0xffu),
+        static_cast<char>((value >> 8) & 0xffu)
+    };
+    os.write(bytes, sizeof(bytes));
+}
+
+void write_u32_le(std::ostream &os, uint32_t value)
+{
+    const char bytes[4] = {
+        static_cast<char>(value & 0xffu),
+        static_cast<char>((value >> 8) & 0xffu),
+        static_cast<char>((value >> 16) & 0xffu),
+        static_cast<char>((value >> 24) & 0xffu)
+    };
+    os.write(bytes, sizeof(bytes));
+}
+
+void write_i32_le(std::ostream &os, int32_t value)
+{
+    write_u32_le(os, static_cast<uint32_t>(value));
+}
+
+void save_bgra32_image_as_bmp(const fs::path &path, k4a_image_t image)
+{
+    if (image == nullptr) {
+        throw std::runtime_error("Color image is null.");
+    }
+    if (k4a_image_get_format(image) != K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+        throw std::runtime_error("Expected BGRA32 color image for BMP output.");
+    }
+
+    const int width = k4a_image_get_width_pixels(image);
+    const int height = k4a_image_get_height_pixels(image);
+    const int stride_bytes = k4a_image_get_stride_bytes(image);
+    if (width <= 0 || height <= 0) {
+        throw std::runtime_error("Invalid color image dimensions.");
+    }
+    if (stride_bytes < width * 4) {
+        throw std::runtime_error("Unexpected BGRA32 image stride.");
+    }
+
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) {
+        throw std::runtime_error("Failed to open output file: " + path.string());
+    }
+
+    const uint32_t pixel_data_size = static_cast<uint32_t>(width) * static_cast<uint32_t>(height) * 4u;
+    const uint32_t file_size = 14u + 40u + pixel_data_size;
+
+    write_u16_le(ofs, 0x4d42u);
+    write_u32_le(ofs, file_size);
+    write_u16_le(ofs, 0u);
+    write_u16_le(ofs, 0u);
+    write_u32_le(ofs, 54u);
+
+    write_u32_le(ofs, 40u);
+    write_i32_le(ofs, width);
+    write_i32_le(ofs, -height);
+    write_u16_le(ofs, 1u);
+    write_u16_le(ofs, 32u);
+    write_u32_le(ofs, 0u);
+    write_u32_le(ofs, pixel_data_size);
+    write_i32_le(ofs, 2835);
+    write_i32_le(ofs, 2835);
+    write_u32_le(ofs, 0u);
+    write_u32_le(ofs, 0u);
+
+    const uint8_t *buffer = k4a_image_get_buffer(image);
+    for (int y = 0; y < height; ++y) {
+        const uint8_t *row = buffer + static_cast<size_t>(y) * static_cast<size_t>(stride_bytes);
+        ofs.write(reinterpret_cast<const char *>(row), static_cast<std::streamsize>(width * 4));
+    }
+
+    if (!ofs) {
+        throw std::runtime_error("Failed while writing BMP file: " + path.string());
+    }
+}
+
+void save_mjpg_image_as_jpeg(const fs::path &path, k4a_image_t image)
+{
+    if (image == nullptr) {
+        throw std::runtime_error("Color image is null.");
+    }
+    if (k4a_image_get_format(image) != K4A_IMAGE_FORMAT_COLOR_MJPG) {
+        throw std::runtime_error("Expected MJPG color image for JPEG output.");
+    }
+
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) {
+        throw std::runtime_error("Failed to open output file: " + path.string());
+    }
+
+    const uint8_t *buffer = k4a_image_get_buffer(image);
+    const size_t size_bytes = k4a_image_get_size(image);
+    ofs.write(reinterpret_cast<const char *>(buffer), static_cast<std::streamsize>(size_bytes));
+    if (!ofs) {
+        throw std::runtime_error("Failed while writing JPEG file: " + path.string());
+    }
+}
+
+void save_depth16_image_as_pgm(const fs::path &path, k4a_image_t image)
+{
+    if (image == nullptr) {
+        throw std::runtime_error("Depth image is null.");
+    }
+    if (k4a_image_get_format(image) != K4A_IMAGE_FORMAT_DEPTH16) {
+        throw std::runtime_error("Expected DEPTH16 image for PGM output.");
+    }
+
+    const int width = k4a_image_get_width_pixels(image);
+    const int height = k4a_image_get_height_pixels(image);
+    const int stride_bytes = k4a_image_get_stride_bytes(image);
+    if (width <= 0 || height <= 0) {
+        throw std::runtime_error("Invalid depth image dimensions.");
+    }
+    if (stride_bytes < width * 2) {
+        throw std::runtime_error("Unexpected DEPTH16 image stride.");
+    }
+
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) {
+        throw std::runtime_error("Failed to open output file: " + path.string());
+    }
+
+    ofs << "P5\n" << width << ' ' << height << "\n65535\n";
+    const uint8_t *buffer = k4a_image_get_buffer(image);
+    for (int y = 0; y < height; ++y) {
+        const uint8_t *row = buffer + static_cast<size_t>(y) * static_cast<size_t>(stride_bytes);
+        for (int x = 0; x < width; ++x) {
+            const uint16_t value =
+                static_cast<uint16_t>(row[2 * x]) |
+                (static_cast<uint16_t>(row[2 * x + 1]) << 8);
+            const char bytes[2] = {
+                static_cast<char>((value >> 8) & 0xffu),
+                static_cast<char>(value & 0xffu)
+            };
+            ofs.write(bytes, sizeof(bytes));
+        }
+    }
+
+    if (!ofs) {
+        throw std::runtime_error("Failed while writing PGM file: " + path.string());
+    }
+}
+
+fs::path save_kinect_color_image(const fs::path &directory, const std::string &stem, k4a_image_t image)
+{
+    const auto format = k4a_image_get_format(image);
+    if (format == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+        const fs::path path = directory / (stem + ".bmp");
+        save_bgra32_image_as_bmp(path, image);
+        return path;
+    }
+    if (format == K4A_IMAGE_FORMAT_COLOR_MJPG) {
+        const fs::path path = directory / (stem + ".jpg");
+        save_mjpg_image_as_jpeg(path, image);
+        return path;
+    }
+    throw std::runtime_error("Unsupported Kinect color image format for capture output.");
+}
+
+ImageCaptureSession create_image_capture_session(
+    const AppConfig &config,
+    const fs::path &config_path)
+{
+    ImageCaptureSession session;
+    const fs::path output_root = resolve_output_path(config.capture_output_dir, config_path);
+    session.session_dir = output_root / make_capture_session_name();
+    session.base_dir = session.session_dir / "base";
+    // `aux` is a reserved DOS device name on Windows, so use `aux_color`.
+    session.aux_dir = session.session_dir / "aux_color";
+    session.aux_depth_dir = session.session_dir / "aux_depth";
+    session.save_aux_depth = config.capture_save_aux_depth;
+
+    std::error_code ec;
+    fs::create_directories(session.base_dir, ec);
+    if (ec) {
+        throw std::runtime_error("Failed to create base capture directory: " + session.base_dir.string());
+    }
+    fs::create_directories(session.aux_dir, ec);
+    if (ec) {
+        throw std::runtime_error("Failed to create aux capture directory: " + session.aux_dir.string());
+    }
+    if (session.save_aux_depth) {
+        fs::create_directories(session.aux_depth_dir, ec);
+        if (ec) {
+            throw std::runtime_error("Failed to create aux depth capture directory: " + session.aux_depth_dir.string());
+        }
+    }
+
+    return session;
+}
+
+CaptureSaveResult save_capture_pair(
+    ImageCaptureSession &session,
+    k4a_image_t base_color_image,
+    k4a_image_t aux_color_image,
+    k4a_image_t aux_depth_image)
+{
+    if (base_color_image == nullptr) {
+        throw std::runtime_error("Base color image is not available for capture.");
+    }
+    if (aux_color_image == nullptr) {
+        throw std::runtime_error("Aux color image is not available for capture.");
+    }
+
+    CaptureSaveResult result;
+    result.stem = make_capture_stem(session.next_index++);
+    result.base_path = save_kinect_color_image(session.base_dir, result.stem, base_color_image);
+    result.aux_path = save_kinect_color_image(session.aux_dir, result.stem, aux_color_image);
+
+    if (session.save_aux_depth && aux_depth_image != nullptr) {
+        const fs::path depth_path = session.aux_depth_dir / (result.stem + ".pgm");
+        save_depth16_image_as_pgm(depth_path, aux_depth_image);
+        result.aux_depth_path = depth_path;
+    }
+
+    return result;
+}
+
+std::string format_capture_save_log_message(const CaptureSaveResult &result)
+{
+    std::ostringstream oss;
+    oss << "Saved Kinect capture pair stem=" << result.stem
+        << " base=" << result.base_path.string()
+        << " aux=" << result.aux_path.string();
+    if (result.aux_depth_path.has_value()) {
+        oss << " aux_depth=" << result.aux_depth_path->string();
+    }
+    return oss.str();
+}
+
+std::wstring make_capture_status_text(const CaptureSaveResult &result)
+{
+    std::wstring text = L"Saved ";
+    text += result.base_path.filename().wstring();
+    text += L" / ";
+    text += result.aux_path.filename().wstring();
+    if (result.aux_depth_path.has_value()) {
+        text += L" / ";
+        text += result.aux_depth_path->filename().wstring();
+    }
+    return text;
 }
 
 fs::path get_runtime_log_path()
@@ -1208,15 +1562,13 @@ const char *wired_sync_mode_to_string(k4a_wired_sync_mode_t mode)
 k4a_device_configuration_t make_aux_device_config(
     const k4a_device_configuration_t &base_config,
     bool standalone_mode,
-    uint32_t subordinate_delay_off_master_usec)
+    uint32_t subordinate_delay_off_master_usec,
+    bool synchronized_images_only)
 {
     k4a_device_configuration_t aux_config = base_config;
     aux_config.color_format = K4A_IMAGE_FORMAT_COLOR_MJPG;
     aux_config.color_resolution = base_config.color_resolution;
-    // Keep wired sync enabled, but do not require color+depth to arrive as a matched pair on aux.
-    // We only consume aux depth in the app, and allowing single-image captures makes the stream
-    // more resilient when the color side drops behind.
-    aux_config.synchronized_images_only = false;
+    aux_config.synchronized_images_only = synchronized_images_only;
     aux_config.wired_sync_mode = standalone_mode
         ? K4A_WIRED_SYNC_MODE_STANDALONE
         : K4A_WIRED_SYNC_MODE_SUBORDINATE;
@@ -1676,6 +2028,165 @@ const char *joint_confidence_to_string(k4abt_joint_confidence_level_t confidence
     }
 }
 
+class FusionTraceWriter {
+public:
+    void open_if_enabled(const AppConfig &config, const fs::path &config_path)
+    {
+        if (!config.enable_fusion_trace_csv) {
+            return;
+        }
+
+        path_ = resolve_output_path(config.fusion_trace_csv_path, config_path);
+        std::error_code ec;
+        if (!path_.parent_path().empty()) {
+            fs::create_directories(path_.parent_path(), ec);
+            if (ec) {
+                throw std::runtime_error("Failed to create fusion trace directory: " + path_.parent_path().string());
+            }
+        }
+
+        ofs_.open(path_, std::ios::trunc);
+        if (!ofs_) {
+            throw std::runtime_error("Failed to open fusion trace CSV: " + path_.string());
+        }
+
+        ofs_ << "frame_index,base_capture_generation,aux_capture_generation,"
+                "base_depth_ts_us,aux_depth_ts_us,sync_phase_us,sync_phase_error_us,"
+                "source,base_conf,aux_body_conf,base_found,aux_body_found,aux_body_used,aux_depth_found,"
+                "base_x_mm,base_y_mm,base_z_mm,"
+                "aux_body_in_base_x_mm,aux_body_in_base_y_mm,aux_body_in_base_z_mm,"
+                "aux_depth_in_base_x_mm,aux_depth_in_base_y_mm,aux_depth_in_base_z_mm,"
+                "fused_x_mm,fused_y_mm,fused_z_mm,fused_minus_base_z_mm,"
+                "aux_body_match_err_mm,aux_match_err_mm,aux_reason\n";
+        enabled_ = true;
+    }
+
+    bool enabled() const
+    {
+        return enabled_;
+    }
+
+    const fs::path &path() const
+    {
+        return path_;
+    }
+
+    void write_row(
+        uint64_t frame_index,
+        uint64_t base_capture_generation,
+        uint64_t aux_capture_generation,
+        const std::optional<int64_t> &base_depth_ts_us,
+        const std::optional<int64_t> &aux_depth_ts_us,
+        const std::optional<int64_t> &sync_phase_us,
+        const std::optional<int64_t> &sync_phase_error_us,
+        const std::string &source,
+        const std::optional<JointSample3D> &base_ear,
+        const std::optional<JointSample3D> &aux_ear,
+        const std::optional<std::array<double, 3>> &aux_body_in_base,
+        bool aux_body_used,
+        const std::optional<double> &aux_body_match_error_mm,
+        const std::optional<std::array<double, 3>> &aux_depth_in_base,
+        const std::optional<AuxDepthSample> &aux_depth_sample,
+        const std::optional<std::array<double, 3>> &fused_ear,
+        const AuxDepthDebugInfo &aux_depth_debug)
+    {
+        if (!enabled_ || !ofs_) {
+            return;
+        }
+
+        ofs_ << frame_index << ','
+             << base_capture_generation << ','
+             << aux_capture_generation << ',';
+        append_optional_int64(base_depth_ts_us);
+        ofs_ << ',';
+        append_optional_int64(aux_depth_ts_us);
+        ofs_ << ',';
+        append_optional_int64(sync_phase_us);
+        ofs_ << ',';
+        append_optional_int64(sync_phase_error_us);
+        ofs_ << ','
+             << csv_escape(source) << ','
+             << csv_escape(base_ear.has_value() ? joint_confidence_to_string(base_ear->confidence_level) : "MISSING") << ','
+             << csv_escape(aux_ear.has_value() ? joint_confidence_to_string(aux_ear->confidence_level) : "MISSING") << ','
+             << (base_ear.has_value() ? "1" : "0") << ','
+             << (aux_body_in_base.has_value() ? "1" : "0") << ','
+             << (aux_body_used ? "1" : "0") << ','
+             << (aux_depth_sample.has_value() ? "1" : "0") << ',';
+
+        append_optional_vec3(base_ear.has_value() ? std::optional<std::array<double, 3>>(base_ear->position) : std::nullopt);
+        ofs_ << ',';
+        append_optional_vec3(aux_body_in_base);
+        ofs_ << ',';
+        append_optional_vec3(aux_depth_in_base);
+        ofs_ << ',';
+        append_optional_vec3(fused_ear);
+        ofs_ << ',';
+        if (fused_ear.has_value() && base_ear.has_value()) {
+            append_value((*fused_ear)[2] - base_ear->position[2]);
+        }
+        ofs_ << ',';
+        if (aux_body_match_error_mm.has_value()) {
+            append_value(*aux_body_match_error_mm);
+        }
+        ofs_ << ',';
+        if (aux_depth_sample.has_value()) {
+            append_value(aux_depth_sample->spatial_error_mm);
+        }
+        ofs_ << ','
+             << csv_escape(aux_depth_debug.failure_reason)
+             << '\n';
+    }
+
+private:
+    static std::string csv_escape(const std::string &value)
+    {
+        std::string escaped = "\"";
+        for (char ch : value) {
+            if (ch == '"') {
+                escaped += "\"\"";
+            } else {
+                escaped += ch;
+            }
+        }
+        escaped += '"';
+        return escaped;
+    }
+
+    void append_optional_int64(const std::optional<int64_t> &value)
+    {
+        if (value.has_value()) {
+            ofs_ << *value;
+        }
+    }
+
+    void append_value(double value)
+    {
+        ofs_ << std::fixed << std::setprecision(6) << value;
+    }
+
+    void append_vec3(const std::array<double, 3> &value)
+    {
+        append_value(value[0]);
+        ofs_ << ',';
+        append_value(value[1]);
+        ofs_ << ',';
+        append_value(value[2]);
+    }
+
+    void append_optional_vec3(const std::optional<std::array<double, 3>> &value)
+    {
+        if (value.has_value()) {
+            append_vec3(*value);
+        } else {
+            ofs_ << ",,";
+        }
+    }
+
+    bool enabled_ = false;
+    fs::path path_;
+    std::ofstream ofs_;
+};
+
 std::optional<std::array<float, 2>> convert_3d_to_color_2d(
     const k4a_calibration_t &calib,
     const std::array<double, 3> &p3d)
@@ -1791,7 +2302,15 @@ std::array<double, 3> transform_base_to_aux(
     return p_aux;
 }
 
-std::array<double, 3> fuse_two_points(
+double distance_mm(const std::array<double, 3> &a, const std::array<double, 3> &b)
+{
+    const double dx = a[0] - b[0];
+    const double dy = a[1] - b[1];
+    const double dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+std::array<double, 3> fuse_depth_only_points(
     const std::array<double, 3> &p1,
     const std::array<double, 3> &p2)
 {
@@ -2176,14 +2695,37 @@ int main(int argc, char **argv)
         std::cout << "PTU enabled: " << (config.enable_ptu ? "true" : "false") << '\n';
         std::cout << "Body tracking enabled: " << (config.enable_body_tracking ? "true" : "false") << '\n';
         std::cout << "Aux body tracking enabled: " << (config.enable_aux_body_tracking ? "true" : "false") << '\n';
+        std::cout << "Max aux body match error [mm]: " << config.max_aux_body_match_error_mm << '\n';
         std::cout << "Body tracking mode: " << config.body_tracking_mode << '\n';
         std::cout << "Body tracking gpu_device_id: " << config.body_tracking_gpu_device_id << '\n';
         std::cout << "Body tracking model asset: " << config.body_tracking_model_path << '\n';
         std::cout << "Tracked ear: " << config.tracked_ear << '\n';
+        std::cout << "Fusion mode: " << config.fusion_mode;
+        if (config.fusion_mode == "depth_only") {
+            std::cout << " (base x/y + aux z)";
+        } else {
+            std::cout << " (use transformed aux 3D point when available)";
+        }
+        std::cout << '\n';
         std::cout << "Aux depth correction: enabled when auxiliary depth is available\n";
         std::cout << "Aux stream mode: app uses depth-only; color stays enabled internally for wired sync\n";
-        std::cout << "Aux synchronized_images_only: false (prefer depth continuity over paired color/depth captures)\n";
+        std::cout << "Aux synchronized_images_only: "
+                  << (config.aux_synchronized_images_only ? "true" : "false");
+        if (config.aux_synchronized_images_only) {
+            std::cout << " (prefer paired color/depth captures for aux)\n";
+        } else {
+            std::cout << " (prefer depth continuity over paired color/depth captures)\n";
+        }
         std::cout << "Allow aux unsynced fallback: " << (config.allow_aux_unsynced_fallback ? "true" : "false") << '\n';
+        std::cout << "Image capture enabled: " << (config.enable_image_capture ? "true" : "false") << '\n';
+        if (config.enable_image_capture) {
+            std::cout << "Image capture output dir: " << config.capture_output_dir << '\n';
+            std::cout << "Capture aux depth image: " << (config.capture_save_aux_depth ? "true" : "false") << '\n';
+        }
+        std::cout << "Fusion trace CSV enabled: " << (config.enable_fusion_trace_csv ? "true" : "false") << '\n';
+        if (config.enable_fusion_trace_csv) {
+            std::cout << "Fusion trace CSV path: " << config.fusion_trace_csv_path << '\n';
+        }
         std::cout << "capture_timeout_ms: " << config.capture_timeout_ms << '\n';
         std::cout << "body_tracking_timeout_ms(config): " << config.body_tracking_timeout_ms << '\n';
         std::cout << "body_tracking_poll_mode: nonblocking (0 ms in 2-camera mode)\n";
@@ -2219,6 +2761,8 @@ int main(int argc, char **argv)
             config.aux_kinect_serial,
             1,
             "aux");
+        const std::string base_device_serial_in_use =
+            find_device_serial_by_index(available_devices, base_device_index).value_or(config.base_kinect_serial);
         uint32_t current_aux_device_index = aux_device_index;
         std::string aux_device_serial_in_use =
             find_device_serial_by_index(available_devices, aux_device_index).value_or(config.aux_kinect_serial);
@@ -2227,10 +2771,19 @@ int main(int argc, char **argv)
                 "Base Kinect and auxiliary Kinect resolved to the same device index: " +
                 std::to_string(base_device_index));
         }
-        std::cout << "Base Kinect role: MASTER (device index " << base_device_index << ")" << '\n';
-        std::cout << "Aux Kinect role: SUBORDINATE (device index " << aux_device_index << ")" << '\n';
+        if ((config.base_kinect_serial.empty() || config.aux_kinect_serial.empty()) && installed_device_count >= 2) {
+            warn_and_log(
+                "Kinect serials are not fully pinned in the config. "
+                "If Windows changes device index order, checkerboard extrinsics may be applied to the wrong camera.");
+        }
+        std::cout << "Base Kinect role: MASTER (device index " << base_device_index
+                  << ", serial " << (base_device_serial_in_use.empty() ? "unknown" : base_device_serial_in_use) << ")" << '\n';
+        std::cout << "Aux Kinect role: SUBORDINATE (device index " << aux_device_index
+                  << ", serial " << (aux_device_serial_in_use.empty() ? "unknown" : aux_device_serial_in_use) << ")" << '\n';
         append_runtime_log("Base Kinect device index: " + std::to_string(base_device_index));
         append_runtime_log("Aux Kinect device index: " + std::to_string(aux_device_index));
+        append_runtime_log("Base Kinect serial in use: " + base_device_serial_in_use);
+        append_runtime_log("Aux Kinect serial in use: " + aux_device_serial_in_use);
 
         std::unique_ptr<PTUController> ptu1;
         std::unique_ptr<PTUController> ptu2;
@@ -2281,7 +2834,8 @@ int main(int argc, char **argv)
         k4a_device_configuration_t aux_config = make_aux_device_config(
             base_config,
             false,
-            config.subordinate_delay_off_master_usec);
+            config.subordinate_delay_off_master_usec,
+            config.aux_synchronized_images_only);
 
         // Start the subordinate first so it can wait for the master's sync pulse.
         if (aux_camera_enabled) {
@@ -2387,6 +2941,8 @@ int main(int argc, char **argv)
         ImageWindow aux_image_window;
         bool base_window_initialized = false;
         bool aux_window_initialized = false;
+        constexpr auto kWindowStatusDuration = std::chrono::milliseconds(1800);
+        constexpr auto kWindowRestartStatusDuration = std::chrono::milliseconds(4200);
         const auto base_window_size = color_resolution_to_size(base_config.color_resolution);
         if (!base_image_window.create(
                 L"Base Azure Kinect [MASTER]",
@@ -2402,6 +2958,7 @@ int main(int argc, char **argv)
         base_image_window.show_bgra(base_startup_display.data());
         std::cout << "Base Azure Kinect window created." << '\n';
         append_runtime_log("Base Azure Kinect window created.");
+        std::vector<uint8_t> aux_startup_display;
         if (aux_device != nullptr) {
             const auto aux_window_size = depth_mode_to_size(aux_config.depth_mode);
             if (!aux_image_window.create(
@@ -2412,12 +2969,37 @@ int main(int argc, char **argv)
                 throw std::runtime_error("Failed to create auxiliary image window");
             }
             aux_window_initialized = true;
-            std::vector<uint8_t> aux_startup_display(
+            aux_startup_display.assign(
                 static_cast<size_t>(aux_window_size[0]) * static_cast<size_t>(aux_window_size[1]) * 4,
                 0);
             aux_image_window.show_bgra(aux_startup_display.data());
             std::cout << "Aux Azure Kinect window created." << '\n';
             append_runtime_log("Aux Azure Kinect window created.");
+        }
+        const auto show_aux_window_status =
+            [&](const std::wstring &message,
+                std::chrono::milliseconds duration,
+                bool clear_to_black) {
+                if (!aux_window_initialized) {
+                    return;
+                }
+                aux_image_window.show_status(message, duration);
+                if (clear_to_black && !aux_startup_display.empty()) {
+                    aux_image_window.show_bgra(aux_startup_display.data());
+                }
+            };
+
+        std::optional<ImageCaptureSession> image_capture_session;
+        if (config.enable_image_capture) {
+            image_capture_session = create_image_capture_session(config, config_path);
+            info_and_log("Image capture session directory: " + image_capture_session->session_dir.string());
+            info_and_log("Press 'c' to save the current base/aux image pair.");
+        }
+
+        FusionTraceWriter fusion_trace_writer;
+        fusion_trace_writer.open_if_enabled(config, config_path);
+        if (fusion_trace_writer.enabled()) {
+            info_and_log("Fusion trace CSV: " + fusion_trace_writer.path().string());
         }
 
         LatestCapturePump base_capture_pump;
@@ -2452,10 +3034,15 @@ int main(int argc, char **argv)
         uint64_t last_aux_capture_generation_enqueued = 0;
         uint64_t last_sync_sample_base_generation = 0;
         uint64_t last_sync_sample_aux_generation = 0;
+        uint64_t fusion_trace_frame_index = 0;
         bool pending_aux_subordinate_restart = false;
         bool pending_aux_standalone_restart = false;
 
-        std::cout << "2-Kinect tracking started. Press 'u' to force update, 'q' to quit." << '\n';
+        std::cout << "2-Kinect tracking started. Press 'u' to force update, 'q' to quit";
+        if (config.enable_image_capture) {
+            std::cout << ", 'c' to capture images";
+        }
+        std::cout << "." << '\n';
 
         while (true) {
             if ((base_window_initialized && !base_image_window.process_messages()) ||
@@ -2644,6 +3231,10 @@ int main(int argc, char **argv)
                     message += " pump_timeouts=" + std::to_string(aux_pump_consecutive_timeouts);
                     message += " pump_failures=" + std::to_string(aux_pump_consecutive_failures);
                     warn_and_log(message);
+                    show_aux_window_status(
+                        L"Aux capture stalled; viewer is showing the last received depth frame.",
+                        kWindowStatusDuration,
+                        false);
                 }
                 if (!aux_sync_checklist_logged &&
                     successful_dual_capture_count == 0 &&
@@ -2661,6 +3252,13 @@ int main(int argc, char **argv)
                     consecutive_aux_capture_failures >= 5) {
                     aux_subordinate_restart_attempted = true;
                     pending_aux_subordinate_restart = true;
+                    base_image_window.show_status(
+                        L"Aux Kinect stalled; restarting subordinate stream.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux capture stalled; restarting subordinate stream...",
+                        kWindowRestartStatusDuration,
+                        false);
                     warn_and_log(
                         "Aux Kinect capture stopped after synchronization was already established. "
                         "Scheduling auxiliary Kinect restart while keeping subordinate sync mode.");
@@ -2672,6 +3270,13 @@ int main(int argc, char **argv)
                     consecutive_aux_capture_failures >= 5) {
                     aux_unsynced_fallback_attempted = true;
                     pending_aux_standalone_restart = true;
+                    base_image_window.show_status(
+                        L"Aux Kinect stalled; restarting in standalone mode.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux capture stalled; restarting in standalone mode...",
+                        kWindowRestartStatusDuration,
+                        false);
                     warn_and_log(
                         "Aux Kinect timed out repeatedly in subordinate mode. "
                         "Scheduling auxiliary Kinect restart in standalone mode.");
@@ -2710,6 +3315,7 @@ int main(int argc, char **argv)
             }
 
             k4a_image_t base_color_image = nullptr;
+            k4a_image_t aux_color_image = nullptr;
             k4a_image_t aux_depth_image = nullptr;
             int color_width = 0;
             int color_height = 0;
@@ -2724,12 +3330,19 @@ int main(int argc, char **argv)
                 }
             }
             if (aux_capture_received) {
+                aux_color_image = k4a_capture_get_color_image(aux_capture);
                 aux_depth_image = k4a_capture_get_depth_image(aux_capture);
                 if (aux_depth_image != nullptr) {
                     aux_depth_width = k4a_image_get_width_pixels(aux_depth_image);
                     aux_depth_height = k4a_image_get_height_pixels(aux_depth_image);
                 }
             }
+            const auto base_depth_ts_for_trace = base_capture != nullptr
+                ? get_capture_depth_timestamp_usec(base_capture)
+                : std::nullopt;
+            const auto aux_depth_ts_for_trace = aux_capture != nullptr
+                ? get_capture_depth_timestamp_usec(aux_capture)
+                : std::nullopt;
 
             auto base_ear = (base_capture_fresh && base_body_frame_ok && base_body_frame != nullptr)
                 ? get_tracked_ear_3d_from_body_frame(base_body_frame, config.tracked_ear)
@@ -2739,9 +3352,20 @@ int main(int argc, char **argv)
                 ? get_tracked_ear_3d_from_body_frame(aux_body_frame, config.tracked_ear)
                 : std::nullopt;
             const bool aux_ear_confident = aux_ear.has_value() && is_confident_joint(aux_ear->confidence_level);
-            auto aux_body_ear_in_base = aux_ear_confident
+            auto raw_aux_body_ear_in_base = aux_ear_confident
                 ? std::optional<std::array<double, 3>>(transform_aux_to_base(aux_ear->position, aux_tf))
                 : std::nullopt;
+            std::optional<std::array<double, 3>> aux_body_ear_in_base;
+            std::optional<double> aux_body_match_error_mm;
+            bool aux_body_rejected_by_match_gate = false;
+            if (base_ear_confident && raw_aux_body_ear_in_base.has_value()) {
+                aux_body_match_error_mm = distance_mm(base_ear->position, *raw_aux_body_ear_in_base);
+                if (*aux_body_match_error_mm <= config.max_aux_body_match_error_mm) {
+                    aux_body_ear_in_base = raw_aux_body_ear_in_base;
+                } else {
+                    aux_body_rejected_by_match_gate = true;
+                }
+            }
             auto aux_body_ear_2d = aux_ear_confident
                 ? convert_3d_to_depth_2d(aux_calibration, aux_ear->position)
                 : std::nullopt;
@@ -2753,6 +3377,9 @@ int main(int argc, char **argv)
                 ? sample_aux_depth_point_for_base_joint(aux_calibration, aux_capture, base_ear->position, aux_tf, &aux_depth_debug)
                 : std::nullopt;
             const bool aux_depth_available = aux_depth_sample.has_value();
+            auto aux_depth_in_base = aux_depth_sample.has_value()
+                ? std::optional<std::array<double, 3>>(transform_aux_to_base(aux_depth_sample->sampled_aux_point_3d, aux_tf))
+                : std::nullopt;
             last_aux_tracked_ear_2d = std::nullopt;
             if (aux_body_ear_2d.has_value()) {
                 last_aux_tracked_ear_2d = aux_body_ear_2d;
@@ -2763,12 +3390,21 @@ int main(int argc, char **argv)
             std::optional<std::array<double, 3>> fused_ear;
             std::string fused_ear_source;
             if (base_ear_confident && aux_body_ear_in_base.has_value()) {
-                fused_ear = fuse_two_points(base_ear->position, *aux_body_ear_in_base);
-                fused_ear_source = "base_xy + aux_body_z";
+                if (config.fusion_mode == "full_3d") {
+                    fused_ear = *aux_body_ear_in_base;
+                    fused_ear_source = "aux_body_in_base_3d";
+                } else {
+                    fused_ear = fuse_depth_only_points(base_ear->position, *aux_body_ear_in_base);
+                    fused_ear_source = "base_xy + aux_body_z";
+                }
             } else if (base_ear_confident && aux_depth_available) {
-                const auto aux_in_base = transform_aux_to_base(aux_depth_sample->sampled_aux_point_3d, aux_tf);
-                fused_ear = fuse_two_points(base_ear->position, aux_in_base);
-                fused_ear_source = "base_xy + aux_depth_z";
+                if (config.fusion_mode == "full_3d") {
+                    fused_ear = *aux_depth_in_base;
+                    fused_ear_source = "aux_depth_in_base_3d";
+                } else {
+                    fused_ear = fuse_depth_only_points(base_ear->position, *aux_depth_in_base);
+                    fused_ear_source = "base_xy + aux_depth_z";
+                }
             } else if (base_ear_confident) {
                 fused_ear = base_ear->position;
                 fused_ear_source = "base_only";
@@ -2802,7 +3438,14 @@ int main(int argc, char **argv)
                           << " aux_depth=" << (aux_depth_available ? "FOUND" : "MISSING")
                           << " aux_mode=" << (aux_camera_enabled ? wired_sync_mode_to_string(aux_config.wired_sync_mode) : "disabled")
                           << " source=" << fused_ear_source;
-                if (aux_body_ear_in_base.has_value() && fused_ear_source == "base_xy + aux_body_z") {
+                if (aux_body_match_error_mm.has_value()) {
+                    std::cout << " aux_body_match_err_mm=" << *aux_body_match_error_mm;
+                }
+                if (aux_body_rejected_by_match_gate) {
+                    std::cout << " aux_body_rejected=match_gate";
+                }
+                if (aux_body_ear_in_base.has_value() &&
+                    (fused_ear_source == "base_xy + aux_body_z" || fused_ear_source == "aux_body_in_base_3d")) {
                     std::cout << " z_delta=" << ((*fused_ear)[2] - base_ear->position[2])
                               << " aux_body_z=" << (*aux_body_ear_in_base)[2];
                 } else if (aux_depth_sample.has_value()) {
@@ -2829,6 +3472,27 @@ int main(int argc, char **argv)
                     }
                 }
                 std::cout << '\n';
+            }
+
+            if (fusion_trace_writer.enabled()) {
+                fusion_trace_writer.write_row(
+                    ++fusion_trace_frame_index,
+                    base_capture_generation,
+                    aux_capture_generation,
+                    base_depth_ts_for_trace,
+                    aux_depth_ts_for_trace,
+                    current_sync_phase_us,
+                    current_sync_phase_error_us,
+                    fused_ear_source,
+                    base_ear,
+                    aux_ear,
+                    raw_aux_body_ear_in_base,
+                    aux_body_ear_in_base.has_value(),
+                    aux_body_match_error_mm,
+                    aux_depth_in_base,
+                    aux_depth_sample,
+                    fused_ear,
+                    aux_depth_debug);
             }
 
             if (base_color_image != nullptr && base_window_initialized && color_width > 0 && color_height > 0) {
@@ -2864,6 +3528,88 @@ int main(int argc, char **argv)
                 aux_image_window.show_bgra(display_buffer.data());
             }
 
+            if (_kbhit()) {
+                const int key = _getch();
+                if (key == 'q') {
+                    if (ptu1 != nullptr) {
+                        ptu1->move(0, 0);
+                    }
+                    if (ptu2 != nullptr) {
+                        ptu2->move(0, 0);
+                    }
+                    if (ptu3 != nullptr) {
+                        ptu3->move(0, 0);
+                    }
+                    if (base_body_frame != nullptr) {
+                        k4abt_frame_release(base_body_frame);
+                        base_body_frame = nullptr;
+                    }
+                    if (aux_body_frame != nullptr) {
+                        k4abt_frame_release(aux_body_frame);
+                        aux_body_frame = nullptr;
+                    }
+                    if (base_color_image != nullptr) {
+                        k4a_image_release(base_color_image);
+                        base_color_image = nullptr;
+                    }
+                    if (aux_color_image != nullptr) {
+                        k4a_image_release(aux_color_image);
+                        aux_color_image = nullptr;
+                    }
+                    if (aux_depth_image != nullptr) {
+                        k4a_image_release(aux_depth_image);
+                        aux_depth_image = nullptr;
+                    }
+                    if (base_capture != nullptr) {
+                        k4a_capture_release(base_capture);
+                        base_capture = nullptr;
+                    }
+                    if (aux_capture != nullptr) {
+                        k4a_capture_release(aux_capture);
+                        aux_capture = nullptr;
+                    }
+                    break;
+                }
+                if (key == 'u' && last_fused_tracked_ear.has_value()) {
+                    auto force_update = [&](TrackingController *pal) {
+                        pal->calculate_and_move(*last_fused_tracked_ear, Clock::now(), true);
+                    };
+
+                    std::vector<std::thread> threads;
+                    threads.emplace_back(force_update, &pal1);
+                    threads.emplace_back(force_update, &pal2);
+                    threads.emplace_back(force_update, &pal3);
+                    for (auto &th : threads) {
+                        th.join();
+                    }
+                    std::cout << "Manually updated\n";
+                } else if (key == 'c') {
+                    if (!image_capture_session.has_value()) {
+                        warn_and_log("Image capture is disabled. Set enable_image_capture=true in the config.");
+                    } else {
+                        try {
+                            const CaptureSaveResult save_result = save_capture_pair(
+                                *image_capture_session,
+                                base_color_image,
+                                aux_color_image,
+                                aux_depth_image);
+                            info_and_log(format_capture_save_log_message(save_result));
+                            const std::wstring status_text = make_capture_status_text(save_result);
+                            base_image_window.show_status(status_text);
+                            if (aux_window_initialized) {
+                                aux_image_window.show_status(status_text);
+                            }
+                        } catch (const std::exception &capture_error) {
+                            warn_and_log(std::string("Failed to save image capture: ") + capture_error.what());
+                            base_image_window.show_status(L"Capture save failed");
+                            if (aux_window_initialized) {
+                                aux_image_window.show_status(L"Capture save failed");
+                            }
+                        }
+                    }
+                }
+            }
+
             if (base_body_frame != nullptr) {
                 k4abt_frame_release(base_body_frame);
             }
@@ -2872,6 +3618,9 @@ int main(int argc, char **argv)
             }
             if (base_color_image != nullptr) {
                 k4a_image_release(base_color_image);
+            }
+            if (aux_color_image != nullptr) {
+                k4a_image_release(aux_color_image);
             }
             if (aux_depth_image != nullptr) {
                 k4a_image_release(aux_depth_image);
@@ -2890,6 +3639,10 @@ int main(int argc, char **argv)
                 last_aux_capture_generation_enqueued = 0;
                 last_aux_predicted_ear_2d.reset();
                 last_aux_tracked_ear_2d.reset();
+                show_aux_window_status(
+                    L"Restarting aux Kinect in subordinate mode...",
+                    kWindowRestartStatusDuration,
+                    true);
                 info_and_log(
                     "Attempting to restart auxiliary Kinect while keeping subordinate sync mode "
                     "after releasing in-flight captures.");
@@ -2911,6 +3664,13 @@ int main(int argc, char **argv)
                     last_sync_sample_aux_generation = 0;
                     sync_phase_baseline_sample_count = 0;
                     sync_phase_baseline_us.reset();
+                    base_image_window.show_status(
+                        L"Aux Kinect restarted; re-learning sync baseline.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux Kinect restarted; re-learning sync baseline.",
+                        kWindowRestartStatusDuration,
+                        true);
                     info_and_log("Aux Kinect restarted successfully in subordinate sync mode.");
                     info_and_log("Sync baseline reset after auxiliary restart.");
                 } else {
@@ -2918,11 +3678,25 @@ int main(int argc, char **argv)
                     if (config.allow_aux_unsynced_fallback && !aux_unsynced_fallback_attempted) {
                         aux_unsynced_fallback_attempted = true;
                         pending_aux_standalone_restart = true;
+                        base_image_window.show_status(
+                            L"Aux restart failed; falling back to standalone mode.",
+                            kWindowRestartStatusDuration);
+                        show_aux_window_status(
+                            L"Aux restart failed; trying standalone mode...",
+                            kWindowRestartStatusDuration,
+                            true);
                         warn_and_log(
                             "Scheduling auxiliary Kinect restart in standalone mode after subordinate restart failure.");
                     } else {
                         warn_and_log("Disabling auxiliary Kinect and continuing with base Kinect only.");
                         aux_camera_enabled = false;
+                        base_image_window.show_status(
+                            L"Aux Kinect disabled; continuing in base-only mode.",
+                            kWindowRestartStatusDuration);
+                        show_aux_window_status(
+                            L"Aux Kinect disabled; base-only mode.",
+                            kWindowRestartStatusDuration,
+                            true);
                     }
                 }
                 continue;
@@ -2933,12 +3707,17 @@ int main(int argc, char **argv)
                 const auto standalone_aux_config = make_aux_device_config(
                     base_config,
                     true,
-                    config.subordinate_delay_off_master_usec);
+                    config.subordinate_delay_off_master_usec,
+                    config.aux_synchronized_images_only);
                 aux_capture_pump.stop();
                 shutdown_and_destroy_tracker(&aux_tracker, "auxiliary");
                 last_aux_capture_generation_enqueued = 0;
                 last_aux_predicted_ear_2d.reset();
                 last_aux_tracked_ear_2d.reset();
+                show_aux_window_status(
+                    L"Restarting aux Kinect in standalone mode...",
+                    kWindowRestartStatusDuration,
+                    true);
                 info_and_log(
                     "Attempting to restart auxiliary Kinect in standalone mode after releasing in-flight captures.");
                 if (restart_aux_camera_with_mode(
@@ -2960,6 +3739,13 @@ int main(int argc, char **argv)
                     last_sync_sample_aux_generation = 0;
                     sync_phase_baseline_sample_count = 0;
                     sync_phase_baseline_us.reset();
+                    base_image_window.show_status(
+                        L"Aux Kinect restarted in standalone mode.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux Kinect restarted in standalone mode.",
+                        kWindowRestartStatusDuration,
+                        true);
                     info_and_log("Aux Kinect restarted successfully in standalone mode.");
                     info_and_log("Sync baseline reset after auxiliary restart.");
                 } else {
@@ -2967,39 +3753,17 @@ int main(int argc, char **argv)
                     warn_and_log("Disabling auxiliary Kinect and continuing with base Kinect only.");
                     aux_camera_enabled = false;
                     aux_device = nullptr;
+                    base_image_window.show_status(
+                        L"Aux Kinect disabled; continuing in base-only mode.",
+                        kWindowRestartStatusDuration);
+                    show_aux_window_status(
+                        L"Aux Kinect disabled; base-only mode.",
+                        kWindowRestartStatusDuration,
+                        true);
                 }
                 continue;
             }
 
-            if (_kbhit()) {
-                const int key = _getch();
-                if (key == 'q') {
-                    if (ptu1 != nullptr) {
-                        ptu1->move(0, 0);
-                    }
-                    if (ptu2 != nullptr) {
-                        ptu2->move(0, 0);
-                    }
-                    if (ptu3 != nullptr) {
-                        ptu3->move(0, 0);
-                    }
-                    break;
-                }
-                if (key == 'u' && last_fused_tracked_ear.has_value()) {
-                    auto force_update = [&](TrackingController *pal) {
-                        pal->calculate_and_move(*last_fused_tracked_ear, Clock::now(), true);
-                    };
-
-                    std::vector<std::thread> threads;
-                    threads.emplace_back(force_update, &pal1);
-                    threads.emplace_back(force_update, &pal2);
-                    threads.emplace_back(force_update, &pal3);
-                    for (auto &th : threads) {
-                        th.join();
-                    }
-                    std::cout << "Manually updated\n";
-                }
-            }
         }
 
         shutdown_and_destroy_tracker(&base_tracker, "base");

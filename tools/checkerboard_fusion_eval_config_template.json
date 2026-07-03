@@ -1,0 +1,29 @@
+{
+    "_note": "Copy this file and edit the paths before running evaluate_checkerboard_fusion.py.",
+    "_note_capture": "Point base_dir and aux_dir at a checkerboard session captured for the known-angle rotation experiment.",
+    "_note_transform": "transform_config should usually point at track_config_2.json or another JSON containing aux_translation_mm and rotation_matrix.",
+    "_note_angles": "angles_csv must map each image stem to its known checkerboard rotation angle in degrees.",
+    "_note_paths": "Relative paths are resolved from this JSON file's directory.",
+    "base_dir": "../calibration_images/20260626_173537_705/base",
+    "aux_dir": "../calibration_images/20260626_173537_705/aux_color",
+    "rig_calibration": "./checkerboard_rig_live.json",
+    "transform_config": "../track_config_2.json",
+    "angles_csv": "../calibration_images/20260626_173537_705/angles.csv",
+    "checkerboard": {
+        "board_cols": 9,
+        "board_rows": 6,
+        "square_size_mm": 22.5,
+        "base_corner_order": "normal",
+        "aux_corner_order": "normal"
+    },
+    "angles": {
+        "stem_col": "stem",
+        "angle_deg_col": "angle_deg",
+        "reference_stem": "0001"
+    },
+    "evaluation": {
+        "rotation_axis": "board_y",
+        "pivot_coordinate_mm": null
+    },
+    "output_json": "../calibration_images/20260626_173537_705/checkerboard_fusion_eval.json"
+}
