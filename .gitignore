@@ -45,6 +45,7 @@ track_test_2_runtime.log
 calibration_images/
 fusion_eval/
 tools/checkerboard_rig_live.json
+評価手法/
 
 # Python cache
 __pycache__/
