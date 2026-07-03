@@ -2960,12 +2960,12 @@ int main(int argc, char **argv)
         append_runtime_log("Base Azure Kinect window created.");
         std::vector<uint8_t> aux_startup_display;
         if (aux_device != nullptr) {
-            const auto aux_window_size = depth_mode_to_size(aux_config.depth_mode);
+            const auto aux_window_size = color_resolution_to_size(aux_config.color_resolution);
             if (!aux_image_window.create(
                     L"Aux Azure Kinect [SUBORDINATE]",
                     aux_window_size[0],
                     aux_window_size[1],
-                    L"SUBORDINATE / Aux Depth")) {
+                    L"SUBORDINATE / Aux Kinect")) {
                 throw std::runtime_error("Failed to create auxiliary image window");
             }
             aux_window_initialized = true;
@@ -3319,8 +3319,8 @@ int main(int argc, char **argv)
             k4a_image_t aux_depth_image = nullptr;
             int color_width = 0;
             int color_height = 0;
-            int aux_depth_width = 0;
-            int aux_depth_height = 0;
+            int aux_color_width = 0;
+            int aux_color_height = 0;
 
             if (base_capture_fresh && base_capture != nullptr) {
                 base_color_image = k4a_capture_get_color_image(base_capture);
@@ -3331,11 +3331,11 @@ int main(int argc, char **argv)
             }
             if (aux_capture_received) {
                 aux_color_image = k4a_capture_get_color_image(aux_capture);
-                aux_depth_image = k4a_capture_get_depth_image(aux_capture);
-                if (aux_depth_image != nullptr) {
-                    aux_depth_width = k4a_image_get_width_pixels(aux_depth_image);
-                    aux_depth_height = k4a_image_get_height_pixels(aux_depth_image);
+                if (aux_color_image != nullptr) {
+                    aux_color_width = k4a_image_get_width_pixels(aux_color_image);
+                    aux_color_height = k4a_image_get_height_pixels(aux_color_image);
                 }
+                aux_depth_image = k4a_capture_get_depth_image(aux_capture);
             }
             const auto base_depth_ts_for_trace = base_capture != nullptr
                 ? get_capture_depth_timestamp_usec(base_capture)
@@ -3367,10 +3367,10 @@ int main(int argc, char **argv)
                 }
             }
             auto aux_body_ear_2d = aux_ear_confident
-                ? convert_3d_to_depth_2d(aux_calibration, aux_ear->position)
+                ? convert_3d_to_color_2d(aux_calibration, aux_ear->position)
                 : std::nullopt;
             last_aux_predicted_ear_2d = (base_ear_confident && aux_device != nullptr)
-                ? convert_3d_to_depth_2d(aux_calibration, transform_base_to_aux(base_ear->position, aux_tf))
+                ? convert_3d_to_color_2d(aux_calibration, transform_base_to_aux(base_ear->position, aux_tf))
                 : std::nullopt;
             AuxDepthDebugInfo aux_depth_debug{};
             auto aux_depth_sample = (base_ear_confident && aux_pair_usable_for_fusion)
@@ -3384,7 +3384,7 @@ int main(int argc, char **argv)
             if (aux_body_ear_2d.has_value()) {
                 last_aux_tracked_ear_2d = aux_body_ear_2d;
             } else if (aux_depth_sample.has_value()) {
-                last_aux_tracked_ear_2d = aux_depth_sample->sampled_depth_2d;
+                last_aux_tracked_ear_2d = convert_3d_to_color_2d(aux_calibration, aux_depth_sample->sampled_aux_point_3d);
             }
 
             std::optional<std::array<double, 3>> fused_ear;
@@ -3511,18 +3511,21 @@ int main(int argc, char **argv)
                 base_image_window.show_bgra(display_buffer.data());
             }
 
-            if (aux_depth_image != nullptr && aux_window_initialized && aux_depth_width > 0 && aux_depth_height > 0) {
-                std::vector<uint8_t> display_buffer = make_depth_bgra_buffer(aux_depth_image);
+            if (aux_color_image != nullptr && aux_window_initialized && aux_color_width > 0 && aux_color_height > 0) {
+                const uint8_t *src = k4a_image_get_buffer(aux_color_image);
+                const size_t image_size = static_cast<size_t>(aux_color_width) * static_cast<size_t>(aux_color_height) * 4;
+                std::vector<uint8_t> display_buffer(image_size);
+                std::memcpy(display_buffer.data(), src, image_size);
 
                 if (last_aux_predicted_ear_2d.has_value()) {
                     const int cx = static_cast<int>((*last_aux_predicted_ear_2d)[0]);
                     const int cy = static_cast<int>((*last_aux_predicted_ear_2d)[1]);
-                    draw_circle_bgra(display_buffer, aux_depth_width, aux_depth_height, cx, cy, 14, 0, 215, 255);
+                    draw_circle_bgra(display_buffer, aux_color_width, aux_color_height, cx, cy, 14, 0, 215, 255);
                 }
                 if (last_aux_tracked_ear_2d.has_value()) {
                     const int cx = static_cast<int>((*last_aux_tracked_ear_2d)[0]);
                     const int cy = static_cast<int>((*last_aux_tracked_ear_2d)[1]);
-                    draw_circle_bgra(display_buffer, aux_depth_width, aux_depth_height, cx, cy, 20);
+                    draw_circle_bgra(display_buffer, aux_color_width, aux_color_height, cx, cy, 20);
                 }
 
                 aux_image_window.show_bgra(display_buffer.data());
