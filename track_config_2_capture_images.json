@@ -38,6 +38,7 @@
     "body_tracking_mode": "gpu_directml",
     "body_tracking_gpu_device_id": 0,
     "tracked_ear": "right",
+    "tracked_person_camera": "base",
     "fusion_mode": "depth_only",
     "capture_timeout_ms": 1000,
     "body_tracking_timeout_ms": 0,

@@ -196,6 +196,7 @@ struct AppConfig {
     int32_t body_tracking_gpu_device_id = 0;
     std::string body_tracking_model_path = "dnn_model_2_0_op11.onnx";
     std::string tracked_ear = "left";
+    std::string tracked_person_camera = "base";
     std::string fusion_mode = "depth_only";
     // Aux Kinect relative position [mm] in base Kinect coordinates.
     std::array<double, 3> aux_translation_mm{};
@@ -317,6 +318,18 @@ std::string normalize_body_tracking_mode(std::string value)
     }
     throw std::runtime_error(
         "Invalid body_tracking_mode. Use 'gpu', 'cpu', 'gpu_cuda', 'gpu_tensorrt', or 'gpu_directml'.");
+}
+
+std::string normalize_tracked_person_camera(std::string value)
+{
+    value = to_lower_ascii(value);
+    if (value.empty() || value == "base" || value == "main" || value == "master") {
+        return "base";
+    }
+    if (value == "aux" || value == "sub" || value == "subordinate") {
+        return "aux";
+    }
+    throw std::runtime_error("Invalid tracked_person_camera. Use 'base' or 'aux'.");
 }
 
 std::string normalize_fusion_mode(std::string value)
@@ -476,6 +489,8 @@ AppConfig load_config(const std::string &path)
     cfg.body_tracking_model_path =
         parse_string_optional(text, "body_tracking_model_path", "dnn_model_2_0_op11.onnx");
     cfg.tracked_ear = normalize_tracked_ear(parse_string_optional(text, "tracked_ear", "left"));
+    cfg.tracked_person_camera =
+        normalize_tracked_person_camera(parse_string_optional(text, "tracked_person_camera", "base"));
     cfg.fusion_mode = normalize_fusion_mode(parse_string_optional(text, "fusion_mode", "depth_only"));
 
     cfg.aux_translation_mm = parse_array3(text, "aux_translation_mm");
@@ -1156,6 +1171,12 @@ struct AuxKinectTransform {
 struct JointSample3D {
     std::array<double, 3> position;
     k4abt_joint_confidence_level_t confidence_level = K4ABT_JOINT_CONFIDENCE_NONE;
+    size_t body_index = 0;
+};
+
+struct EarCandidateInBase {
+    JointSample3D sample;
+    std::array<double, 3> position_in_base;
 };
 
 struct AuxDepthSample {
@@ -2321,36 +2342,95 @@ std::array<double, 3> fuse_depth_only_points(
     };
 }
 
-std::optional<JointSample3D> get_tracked_ear_3d_from_body_frame(
+std::vector<JointSample3D> get_tracked_ear_candidates_from_body_frame(
     k4abt_frame_t body_frame,
     const std::string &tracked_ear)
 {
+    std::vector<JointSample3D> candidates;
     if (body_frame == nullptr) {
-        return std::nullopt;
+        return candidates;
     }
 
     const size_t num_bodies = k4abt_frame_get_num_bodies(body_frame);
     if (num_bodies == 0) {
-        return std::nullopt;
-    }
-
-    k4abt_skeleton_t skeleton{};
-    if (k4abt_frame_get_body_skeleton(body_frame, 0, &skeleton) != K4A_RESULT_SUCCEEDED) {
-        return std::nullopt;
+        return candidates;
     }
 
     const k4abt_joint_id_t joint_id =
         (tracked_ear == "right") ? K4ABT_JOINT_EAR_RIGHT : K4ABT_JOINT_EAR_LEFT;
-    const auto &ear_joint = skeleton.joints[joint_id];
-    const auto &ear = ear_joint.position;
-    return JointSample3D{
-        {
-            static_cast<double>(ear.v[0]),
-            static_cast<double>(ear.v[1]),
-            static_cast<double>(ear.v[2])
-        },
-        ear_joint.confidence_level
-    };
+    candidates.reserve(num_bodies);
+    for (size_t body_index = 0; body_index < num_bodies; ++body_index) {
+        k4abt_skeleton_t skeleton{};
+        if (k4abt_frame_get_body_skeleton(body_frame, static_cast<uint32_t>(body_index), &skeleton) != K4A_RESULT_SUCCEEDED) {
+            continue;
+        }
+
+        const auto &ear_joint = skeleton.joints[joint_id];
+        if (ear_joint.confidence_level == K4ABT_JOINT_CONFIDENCE_NONE) {
+            continue;
+        }
+
+        const auto &ear = ear_joint.position;
+        candidates.push_back(JointSample3D{
+            {
+                static_cast<double>(ear.v[0]),
+                static_cast<double>(ear.v[1]),
+                static_cast<double>(ear.v[2])
+            },
+            ear_joint.confidence_level,
+            body_index
+        });
+    }
+    return candidates;
+}
+
+std::optional<JointSample3D> select_frontmost_ear_candidate(
+    const std::vector<JointSample3D> &candidates)
+{
+    if (candidates.empty()) {
+        return std::nullopt;
+    }
+
+    const JointSample3D *best = nullptr;
+    for (const auto &candidate : candidates) {
+        if (candidate.position[2] <= 0.0) {
+            continue;
+        }
+        if (best == nullptr ||
+            candidate.position[2] < best->position[2] ||
+            (candidate.position[2] == best->position[2] && candidate.confidence_level > best->confidence_level)) {
+            best = &candidate;
+        }
+    }
+
+    if (best != nullptr) {
+        return *best;
+    }
+    return candidates.front();
+}
+
+std::optional<EarCandidateInBase> find_nearest_ear_candidate_in_base(
+    const std::vector<EarCandidateInBase> &candidates,
+    const std::array<double, 3> &reference_in_base)
+{
+    if (candidates.empty()) {
+        return std::nullopt;
+    }
+
+    const EarCandidateInBase *best = nullptr;
+    double best_error_mm = std::numeric_limits<double>::infinity();
+    for (const auto &candidate : candidates) {
+        const double candidate_error_mm = distance_mm(candidate.position_in_base, reference_in_base);
+        if (candidate_error_mm < best_error_mm) {
+            best = &candidate;
+            best_error_mm = candidate_error_mm;
+        }
+    }
+
+    if (best == nullptr) {
+        return std::nullopt;
+    }
+    return *best;
 }
 
 std::optional<AuxDepthSample> sample_aux_depth_point_for_base_joint(
@@ -2700,6 +2780,7 @@ int main(int argc, char **argv)
         std::cout << "Body tracking gpu_device_id: " << config.body_tracking_gpu_device_id << '\n';
         std::cout << "Body tracking model asset: " << config.body_tracking_model_path << '\n';
         std::cout << "Tracked ear: " << config.tracked_ear << '\n';
+        std::cout << "Tracked person camera: " << config.tracked_person_camera << '\n';
         std::cout << "Fusion mode: " << config.fusion_mode;
         if (config.fusion_mode == "depth_only") {
             std::cout << " (base x/y + aux z)";
@@ -2905,8 +2986,9 @@ int main(int argc, char **argv)
                     aux_tracker_mode_in_use + "'.");
             }
         };
+        bool aux_body_tracking_requested = false;
         if (config.enable_body_tracking) {
-            const bool aux_body_tracking_requested =
+            aux_body_tracking_requested =
                 aux_camera_enabled && config.enable_aux_body_tracking;
             std::string base_tracker_mode_in_use;
             if (!create_body_tracker_with_fallback(
@@ -2936,6 +3018,14 @@ int main(int argc, char **argv)
             }
         } else {
             std::cout << "Body tracking disabled by config.\n";
+        }
+        std::string effective_tracked_person_camera = config.tracked_person_camera;
+        if (effective_tracked_person_camera == "aux" &&
+            (!config.enable_body_tracking || !aux_body_tracking_requested || aux_tracker == nullptr)) {
+            warn_and_log(
+                "tracked_person_camera=aux requested, but auxiliary body tracking is unavailable. "
+                "Falling back to base camera frontmost-person selection.");
+            effective_tracked_person_camera = "base";
         }
         ImageWindow base_image_window;
         ImageWindow aux_image_window;
@@ -3344,16 +3434,62 @@ int main(int argc, char **argv)
                 ? get_capture_depth_timestamp_usec(aux_capture)
                 : std::nullopt;
 
-            auto base_ear = (base_capture_fresh && base_body_frame_ok && base_body_frame != nullptr)
-                ? get_tracked_ear_3d_from_body_frame(base_body_frame, config.tracked_ear)
-                : std::nullopt;
+            const auto base_ear_candidates =
+                (base_capture_fresh && base_body_frame_ok && base_body_frame != nullptr)
+                    ? get_tracked_ear_candidates_from_body_frame(base_body_frame, config.tracked_ear)
+                    : std::vector<JointSample3D>{};
+            const auto aux_ear_candidates =
+                (aux_capture_fresh && aux_body_frame_ok && aux_body_frame != nullptr)
+                    ? get_tracked_ear_candidates_from_body_frame(aux_body_frame, config.tracked_ear)
+                    : std::vector<JointSample3D>{};
+
+            std::vector<EarCandidateInBase> base_ear_candidates_in_base;
+            base_ear_candidates_in_base.reserve(base_ear_candidates.size());
+            for (const auto &candidate : base_ear_candidates) {
+                base_ear_candidates_in_base.push_back(EarCandidateInBase{candidate, candidate.position});
+            }
+
+            std::vector<EarCandidateInBase> aux_ear_candidates_in_base;
+            aux_ear_candidates_in_base.reserve(aux_ear_candidates.size());
+            for (const auto &candidate : aux_ear_candidates) {
+                aux_ear_candidates_in_base.push_back(EarCandidateInBase{
+                    candidate,
+                    transform_aux_to_base(candidate.position, aux_tf)
+                });
+            }
+
+            std::optional<JointSample3D> base_ear;
+            std::optional<JointSample3D> aux_ear;
+            std::optional<EarCandidateInBase> selected_aux_ear_in_base;
+            if (effective_tracked_person_camera == "aux") {
+                aux_ear = select_frontmost_ear_candidate(aux_ear_candidates);
+                if (aux_ear.has_value()) {
+                    selected_aux_ear_in_base = EarCandidateInBase{
+                        *aux_ear,
+                        transform_aux_to_base(aux_ear->position, aux_tf)
+                    };
+                    if (const auto matched_base_ear = find_nearest_ear_candidate_in_base(
+                            base_ear_candidates_in_base,
+                            selected_aux_ear_in_base->position_in_base)) {
+                        base_ear = matched_base_ear->sample;
+                    }
+                }
+            } else {
+                base_ear = select_frontmost_ear_candidate(base_ear_candidates);
+                if (base_ear.has_value()) {
+                    if (const auto matched_aux_ear = find_nearest_ear_candidate_in_base(
+                            aux_ear_candidates_in_base,
+                            base_ear->position)) {
+                        aux_ear = matched_aux_ear->sample;
+                        selected_aux_ear_in_base = *matched_aux_ear;
+                    }
+                }
+            }
+
             const bool base_ear_confident = base_ear.has_value() && is_confident_joint(base_ear->confidence_level);
-            auto aux_ear = (aux_capture_fresh && aux_body_frame_ok && aux_body_frame != nullptr)
-                ? get_tracked_ear_3d_from_body_frame(aux_body_frame, config.tracked_ear)
-                : std::nullopt;
             const bool aux_ear_confident = aux_ear.has_value() && is_confident_joint(aux_ear->confidence_level);
-            auto raw_aux_body_ear_in_base = aux_ear_confident
-                ? std::optional<std::array<double, 3>>(transform_aux_to_base(aux_ear->position, aux_tf))
+            auto raw_aux_body_ear_in_base = aux_ear_confident && selected_aux_ear_in_base.has_value()
+                ? std::optional<std::array<double, 3>>(selected_aux_ear_in_base->position_in_base)
                 : std::nullopt;
             std::optional<std::array<double, 3>> aux_body_ear_in_base;
             std::optional<double> aux_body_match_error_mm;
@@ -3373,7 +3509,7 @@ int main(int argc, char **argv)
                 ? convert_3d_to_color_2d(aux_calibration, transform_base_to_aux(base_ear->position, aux_tf))
                 : std::nullopt;
             AuxDepthDebugInfo aux_depth_debug{};
-            auto aux_depth_sample = (base_ear_confident && aux_pair_usable_for_fusion)
+            auto aux_depth_sample = (effective_tracked_person_camera == "base" && base_ear_confident && aux_pair_usable_for_fusion)
                 ? sample_aux_depth_point_for_base_joint(aux_calibration, aux_capture, base_ear->position, aux_tf, &aux_depth_debug)
                 : std::nullopt;
             const bool aux_depth_available = aux_depth_sample.has_value();
@@ -3390,7 +3526,10 @@ int main(int argc, char **argv)
             std::optional<std::array<double, 3>> fused_ear;
             std::string fused_ear_source;
             if (base_ear_confident && aux_body_ear_in_base.has_value()) {
-                if (config.fusion_mode == "full_3d") {
+                if (effective_tracked_person_camera == "aux" && config.fusion_mode == "depth_only") {
+                    fused_ear = fuse_depth_only_points(base_ear->position, *aux_body_ear_in_base);
+                    fused_ear_source = "base_xy + aux_frontmost_z";
+                } else if (config.fusion_mode == "full_3d") {
                     fused_ear = *aux_body_ear_in_base;
                     fused_ear_source = "aux_body_in_base_3d";
                 } else {
@@ -3408,6 +3547,9 @@ int main(int argc, char **argv)
             } else if (base_ear_confident) {
                 fused_ear = base_ear->position;
                 fused_ear_source = "base_only";
+            } else if (effective_tracked_person_camera == "aux" && raw_aux_body_ear_in_base.has_value()) {
+                fused_ear = *raw_aux_body_ear_in_base;
+                fused_ear_source = "aux_frontmost_only";
             }
 
             const auto now = Clock::now();
@@ -3431,6 +3573,7 @@ int main(int argc, char **argv)
                           << (*fused_ear)[0] << ", "
                           << (*fused_ear)[1] << ", "
                           << (*fused_ear)[2]
+                          << " | selection_camera=" << effective_tracked_person_camera
                           << " | base_z=" << (base_ear.has_value() ? base_ear->position[2] : 0.0)
                           << " | base_conf=" << (base_ear.has_value() ? joint_confidence_to_string(base_ear->confidence_level) : "MISSING")
                           << " aux_body=" << (aux_ear_confident ? "FOUND" : "MISSING")
@@ -3445,7 +3588,9 @@ int main(int argc, char **argv)
                     std::cout << " aux_body_rejected=match_gate";
                 }
                 if (aux_body_ear_in_base.has_value() &&
-                    (fused_ear_source == "base_xy + aux_body_z" || fused_ear_source == "aux_body_in_base_3d")) {
+                    (fused_ear_source == "base_xy + aux_body_z" ||
+                     fused_ear_source == "base_xy + aux_frontmost_z" ||
+                     fused_ear_source == "aux_body_in_base_3d")) {
                     std::cout << " z_delta=" << ((*fused_ear)[2] - base_ear->position[2])
                               << " aux_body_z=" << (*aux_body_ear_in_base)[2];
                 } else if (aux_depth_sample.has_value()) {
