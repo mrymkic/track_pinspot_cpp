@@ -12,7 +12,8 @@ Azure Kinect 2台を使って、耳の 3D 座標を追跡しながら `base` / `
 - 追跡対象は耳です。複数人が写っていても、選択したカメラで最前面にいる 1 人だけを追跡します。
 - 最前面の判定対象カメラは `tracked_person_camera` で切り替えできます。
 - 座標統合モードは `fusion_mode` で切り替えできます。
-- 補助カメラの表示は白黒 depth ではなくフルカラー表示です。
+- 補助カメラの表示は既定で白黒 depth です。`aux_view_mode` を `color` にするとカラー表示へ切り替えできます。
+- `aux_view_mode=depth` のままでも、チェッカーボード撮影時は `aux_color` へカラー画像を保存できます。
 - チェッカーボード撮影から `aux_translation_mm` / `rotation_matrix` を更新するフローがあります。
 
 ## 主要な考え方
@@ -75,6 +76,9 @@ Azure Kinect 2台を使って、耳の 3D 座標を追跡しながら `base` / `
   - 同義語として `main` / `master` は `base`、`sub` / `subordinate` は `aux` として扱います
 - `fusion_mode`
   - `depth_only` または `full_3d`
+- `aux_view_mode`
+  - `depth` または `color`
+  - 既定値は `depth`
 - `body_tracking_mode`
   - 現状の推奨は `gpu_cuda`
 - `body_tracking_model_path`
@@ -82,6 +86,9 @@ Azure Kinect 2台を使って、耳の 3D 座標を追跡しながら `base` / `
 - `aux_translation_mm`
 - `rotation_matrix`
   - チェッカーボード校正で更新する値
+- `base_kinect_serial`
+- `aux_kinect_serial`
+  - デバイスの並び替わりで `base` / `aux` が入れ替わらないよう固定する値
 
 ## 推奨設定
 
@@ -92,6 +99,8 @@ Azure Kinect 2台を使って、耳の 3D 座標を追跡しながら `base` / `
 - `enable_aux_body_tracking = true`
 - `tracked_person_camera = "base"`
 - `fusion_mode = "depth_only"`
+- `aux_view_mode = "depth"`
+- `base_kinect_serial` / `aux_kinect_serial` は使用実機の serial を設定
 
 ## ビルド
 
@@ -137,6 +146,7 @@ build_2cam_x64\track_test_cpp_2cam.exe track_config_2_capture_images.json
 - `base` 側は `base/`
 - 補助カメラ側は予約語回避のため `aux_color/`
 - 必要なら `capture_save_aux_depth = true` で `aux_depth/` も保存できます
+- `aux_view_mode` が `depth` でも、保存される補助カメラ画像は `aux_color` のカラー画像です
 
 ### 2. rig calibration を書き出す
 
@@ -161,6 +171,8 @@ python .\tools\calibrate_checkerboard_extrinsics.py --calibration-config .\tools
 ```
 
 `config_out` を `track_config_2.json` にしている場合は、関連する `track_config_2*.json` にも同じ rig 値が同期されます。
+
+校正後は、`base_kinect_serial` / `aux_kinect_serial` もあわせて固定しておくと、次回起動時に Windows のデバイス順が変わっても同じカメラ組み合わせで統合できます。
 
 ## 統合結果の評価
 

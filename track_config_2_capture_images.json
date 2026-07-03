@@ -40,30 +40,31 @@
     "tracked_ear": "right",
     "tracked_person_camera": "base",
     "fusion_mode": "depth_only",
+    "aux_view_mode": "depth",
     "capture_timeout_ms": 1000,
     "body_tracking_timeout_ms": 0,
-    "base_kinect_serial": "",
-    "aux_kinect_serial": "",
+    "base_kinect_serial": "000522521612",
+    "aux_kinect_serial": "000535121612",
     "aux_translation_mm": [
-        864.858331,
-        12.776112,
-        388.477163
+        843.696446,
+        -19.154576,
+        680.400117
     ],
     "rotation_matrix": [
         [
-            -0.010918,
-            0.078567,
-            -0.996849
+            0.024391,
+            0.072867,
+            -0.997043
         ],
         [
-            -0.121728,
-            0.98939,
-            0.079312
+            -0.109332,
+            0.991552,
+            0.069791
         ],
         [
-            0.992503,
-            0.122211,
-            -0.001238
+            0.993706,
+            0.107307,
+            0.032152
         ]
     ],
     "subordinate_delay_off_master_usec": 160
