@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from capture_floor_calibration import board_observation, read_settings, run_live, save_capture, validate_height
+from capture_floor_calibration import board_observation, read_settings, reference_geometry, run_live, save_capture, validate_height
 from calibrate_checkerboard_extrinsics import CameraCalibration
 from kinect_capture import CameraFrame, CapturePair
 
@@ -57,14 +57,51 @@ class FloorCaptureTests(unittest.TestCase):
     def test_inverted_preview_keeps_reference_point_in_native_camera_coordinates(self):
         original = checkerboard()
         upside_down = cv2.rotate(original, cv2.ROTATE_180)
-        _, _, base = board_observation(frame(original), calibration("base"), self.settings, "base", "normal")
-        _, _, aux = board_observation(frame(upside_down), calibration("aux"), self.settings, "aux", "normal")
+        _, _, base = board_observation(frame(original), calibration("base"), self.settings, "base", "auto_bottom")
+        _, _, aux = board_observation(frame(upside_down), calibration("aux"), self.settings, "aux", "auto_bottom")
         self.assertIsNotNone(base)
         self.assertIsNotNone(aux)
         flip = np.diag([-1., -1., 1.])
         np.testing.assert_allclose(aux["reference_point_depth_mm"], flip @ base["reference_point_depth_mm"], atol=0.05)
         self.assertLess(base["reprojection_error_px"], 0.1)
         self.assertLess(aux["reprojection_error_px"], 0.1)
+        self.assertEqual(base["reference_kind"], "bottom_edge_center")
+        np.testing.assert_allclose(base["reference_point_raw_color_px"], [319.5, 359.5], atol=0.1)
+        np.testing.assert_allclose(aux["reference_point_raw_color_px"], [319.5, 119.5], atol=0.1)
+
+    def test_bottom_reference_follows_board_tilt_and_measured_margin(self):
+        camera = calibration("base")
+        rotation_vector = np.array([0.2, 0.15, 0.0])
+        rotation = cv2.Rodrigues(rotation_vector)[0]
+        translation = np.array([-88., -55., 500.])
+        board_edges = np.array([[-22., -22., 0], [198., -22., 0], [198., 132., 0], [-22., 132., 0]])
+        destination, _ = cv2.projectPoints(board_edges, rotation_vector, translation,
+                                          camera.color_camera_matrix, camera.color_distortion_coeffs)
+        source = np.array([[119.5, 79.5], [519.5, 79.5], [519.5, 359.5], [119.5, 359.5]], np.float32)
+        homography = cv2.getPerspectiveTransform(source, destination.reshape(4, 2).astype(np.float32))
+        tilted = cv2.warpPerspective(checkerboard(), homography, (640, 480), borderValue=(210, 210, 210, 255))
+        for margin in (0., 11.):
+            with self.subTest(margin=margin):
+                settings = {**self.settings, "reference_bottom_margin_mm": margin}
+                _, _, observation = board_observation(frame(tilted), camera, settings, "base", "auto_bottom")
+                self.assertIsNotNone(observation)
+                np.testing.assert_allclose(observation["reference_point_depth_mm"],
+                                           rotation @ np.array([88., 132. + margin, 0.]) + translation, atol=1.0)
+                self.assertLess(observation["reprojection_error_px"], 0.3)
+
+    def test_negative_bottom_margin_is_rejected(self):
+        with self.assertRaises(ValueError):
+            reference_geometry({**self.settings, "reference_bottom_margin_mm": -1})
+
+    def test_bottom_reference_is_stable_when_detector_reverses_corner_order(self):
+        image = checkerboard()
+        found, corners = cv2.findChessboardCornersSB(cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY), (9, 6),
+                                                    flags=cv2.CALIB_CB_NORMALIZE_IMAGE)
+        self.assertTrue(found)
+        for detected in (corners.copy(), corners[::-1].copy()):
+            with patch("capture_floor_calibration.cv2.findChessboardCornersSB", return_value=(True, detected)):
+                _, _, observation = board_observation(frame(image), calibration("base"), self.settings, "base", "auto_bottom")
+            np.testing.assert_allclose(observation["reference_point_raw_color_px"], [319.5, 359.5], atol=0.1)
 
     def test_capture_preserves_raw_orientation_depth_units_and_height(self):
         original = checkerboard()
@@ -132,7 +169,7 @@ class FloorCaptureTests(unittest.TestCase):
             count, manifest = self.run_simulated_capture(session, [ord("c"), ord("a"), ord("c"), ord("q")], 1123.5)
             self.assertEqual(count, 2)
             self.assertEqual(manifest["status"], "closed")
-            self.assertEqual(manifest["corner_orders"], {"base": "normal", "aux": "normal"})
+            self.assertEqual(manifest["corner_orders"], {"base": "auto_bottom", "aux": "auto_bottom"})
             first = json.loads((session / "captures/0001.json").read_text())
             second = json.loads((session / "captures/0002.json").read_text())
             self.assertEqual(first["reference_height_mm"], 1123.5)

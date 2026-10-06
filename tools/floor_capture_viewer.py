@@ -15,7 +15,7 @@ class CaptureViewer:
         self.photo = None
         self.image = tk.Label(self.root)
         self.image.pack()
-        tk.Label(self.root, text="両画面の黄色いREFを同じ印付き交点に合わせてください。 C / Space：保存　A：aux反転　B：base反転　Q / Esc：終了").pack()
+        tk.Label(self.root, text="両画面の黄色いREFを同じ印付き基準点に合わせてください。 C / Space：保存　A：aux反転　B：base反転　Q / Esc：終了").pack()
         self.root.bind("<KeyPress>", self._on_key)
         self.root.update()
 
