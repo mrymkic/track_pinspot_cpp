@@ -1,0 +1,101 @@
+{
+  "pal_1": {
+    "port": "COM5",
+    "vc": [
+      -700,
+      -700,
+      4700
+    ],
+    "rotate": 180
+  },
+  "pal_2": {
+    "port": "COM6",
+    "vc": [
+      900,
+      -500,
+      4700
+    ],
+    "rotate": 180
+  },
+  "pal_3": {
+    "port": "COM7",
+    "vc": [
+      2000,
+      -500,
+      4700
+    ],
+    "rotate": 180
+  },
+  "update_interval": 0,
+  "pt_factor": 3600,
+  "enable_ptu": false,
+  "enable_body_tracking": true,
+  "allow_aux_unsynced_fallback": false,
+  "body_tracking_mode": "gpu_cuda",
+  "body_tracking_gpu_device_id": 0,
+  "body_tracking_model_path": "dnn_model_2_0_lite_op11.onnx",
+  "tracked_ear": "right",
+  "tracked_person_camera": "base",
+  "fusion_mode": "depth_only",
+  "aux_view_mode": "depth",
+  "capture_timeout_ms": 1000,
+  "body_tracking_timeout_ms": 0,
+  "base_kinect_serial": "000522521612",
+  "aux_kinect_serial": "000535121612",
+  "aux_translation_mm": [
+    -1224.4010209389905,
+    -1026.7075625997204,
+    559.8885453406604
+  ],
+  "rotation_matrix": [
+    [
+      -0.05520475873630338,
+      0.4121885453913595,
+      0.9094245640299268
+    ],
+    [
+      -0.6699910101938806,
+      -0.6906096982770781,
+      0.27234223121842027
+    ],
+    [
+      0.7403137719050283,
+      -0.5942716951814205,
+      0.31428756169144023
+    ]
+  ],
+  "subordinate_delay_off_master_usec": 160,
+  "enable_aux_body_tracking": true,
+  "base_sensor_orientation": "default",
+  "aux_sensor_orientation": "flip180",
+  "coordinate_output_frame": "base_floor",
+  "floor_basis_matrix": [
+    [
+      0.9999995140702161,
+      -0.0009858292611504252,
+      0.0
+    ],
+    [
+      -0.0007456266486610113,
+      -0.7563442430879944,
+      -0.6541733944364828
+    ],
+    [
+      -0.0006449032741015835,
+      -0.6541730765541467,
+      0.7563446106183673
+    ]
+  ],
+  "floor_translation_mm": [
+    0.0,
+    2087.4037323538532,
+    0.0
+  ],
+  "virtual_aux_origin_floor_mm": [
+    -1223.388267608212,
+    0.0,
+    1095.902748989851
+  ],
+  "coordinate_output_dir": "floor_tracking",
+  "floor_calibration_session": "20261006_171714_807823"
+}

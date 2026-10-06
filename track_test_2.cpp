@@ -29,6 +29,7 @@
 
 #include <k4a/k4a.h>
 #include <k4abt.h>
+#include "coordinate_output.h"
 
 namespace {
 
@@ -84,20 +85,30 @@ public:
         }
 
         MSG msg{};
-        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
                 return false;
             }
             TranslateMessage(&msg);
-            DispatchMessage(&msg);
+            DispatchMessageW(&msg);
         }
         return IsWindow(hwnd_) != FALSE;
     }
 
-    void show_bgra(const uint8_t *bgra_data)
+    void show_bgra(const uint8_t *bgra_data, bool rotate180 = false)
     {
         if (hwnd_ == nullptr) {
             return;
+        }
+
+        std::vector<uint8_t> upright;
+        if (rotate180) {
+            const size_t pixels = static_cast<size_t>(width_) * static_cast<size_t>(height_);
+            upright.resize(pixels * 4);
+            for (size_t pixel = 0; pixel < pixels; ++pixel) {
+                std::memcpy(upright.data() + pixel * 4, bgra_data + (pixels - 1 - pixel) * 4, 4);
+            }
+            bgra_data = upright.data();
         }
 
         BITMAPINFO bmi{};
@@ -167,7 +178,7 @@ private:
             PostQuitMessage(0);
             return 0;
         }
-        return DefWindowProc(hwnd, msg, wparam, lparam);
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
 };
 
@@ -215,6 +226,11 @@ struct AppConfig {
     bool capture_save_aux_depth = false;
     bool enable_fusion_trace_csv = false;
     std::string fusion_trace_csv_path = "fusion_eval/fusion_trace.csv";
+    std::string base_sensor_orientation = "default";
+    std::string aux_sensor_orientation = "default";
+    std::string coordinate_output_frame = "native";
+    std::string coordinate_output_dir = "floor_tracking";
+    coordinates::FloorTransform floor_transform;
 };
 
 struct ImageCaptureSession {
@@ -473,6 +489,15 @@ std::optional<std::array<std::array<double, 3>, 3>> parse_matrix3_optional(
     }};
 }
 
+k4abt_sensor_orientation_t sensor_orientation(const std::string &orientation)
+{
+    if (orientation == "default") return K4ABT_SENSOR_ORIENTATION_DEFAULT;
+    if (orientation == "flip180") return K4ABT_SENSOR_ORIENTATION_FLIP180;
+    if (orientation == "clockwise90") return K4ABT_SENSOR_ORIENTATION_CLOCKWISE90;
+    if (orientation == "counterclockwise90") return K4ABT_SENSOR_ORIENTATION_COUNTERCLOCKWISE90;
+    throw std::runtime_error("Unknown sensor orientation: " + orientation);
+}
+
 AppConfig load_config(const std::string &path)
 {
     std::ifstream ifs(path);
@@ -532,6 +557,26 @@ AppConfig load_config(const std::string &path)
     cfg.capture_save_aux_depth = parse_bool_optional(text, "capture_save_aux_depth", false);
     cfg.enable_fusion_trace_csv = parse_bool_optional(text, "enable_fusion_trace_csv", false);
     cfg.fusion_trace_csv_path = parse_string_optional(text, "fusion_trace_csv_path", "fusion_eval/fusion_trace.csv");
+
+    cfg.base_sensor_orientation = parse_string_optional(text, "base_sensor_orientation", "default");
+    cfg.aux_sensor_orientation = parse_string_optional(text, "aux_sensor_orientation", "default");
+    sensor_orientation(cfg.base_sensor_orientation);
+    sensor_orientation(cfg.aux_sensor_orientation);
+    cfg.coordinate_output_frame = parse_string_optional(text, "coordinate_output_frame", "native");
+    cfg.coordinate_output_dir = parse_string_optional(text, "coordinate_output_dir", "floor_tracking");
+    if (cfg.coordinate_output_frame != "native") {
+        if (cfg.coordinate_output_frame != "base_floor" && cfg.coordinate_output_frame != "aux_floor_90") {
+            throw std::runtime_error("coordinate_output_frame must be native, base_floor, or aux_floor_90.");
+        }
+        const auto basis = parse_matrix3_optional(text, "floor_basis_matrix");
+        if (!basis.has_value()) throw std::runtime_error("Floor output requires floor_basis_matrix.");
+        cfg.floor_transform.basis = *basis;
+        cfg.floor_transform.translation_mm = parse_array3(text, "floor_translation_mm");
+        cfg.floor_transform.virtual_aux_origin_mm = parse_array3(text, "virtual_aux_origin_floor_mm");
+        cfg.floor_transform.validate();
+        coordinates::validate_basis(cfg.aux_rotation_matrix, false);
+        coordinates::validate_point(cfg.aux_translation_mm);
+    }
 
     return cfg;
 }
@@ -2023,6 +2068,7 @@ bool create_body_tracker_with_fallback(
     const std::string &requested_mode,
     int32_t requested_gpu_device_id,
     const std::string &model_path,
+    const std::string &mounting_orientation,
     k4abt_tracker_t *tracker_out,
     std::string *selected_mode_out)
 {
@@ -2040,11 +2086,13 @@ bool create_body_tracker_with_fallback(
         tracker_config.processing_mode = to_k4abt_processing_mode(mode);
         tracker_config.gpu_device_id = requested_gpu_device_id;
         tracker_config.model_path = model_path.c_str();
+        tracker_config.sensor_orientation = sensor_orientation(mounting_orientation);
 
         if (i == 0) {
             info_and_log(
                 "Attempting " + tracker_label + " body tracker with mode: " + mode +
-                ", gpu_device_id=" + std::to_string(requested_gpu_device_id));
+                ", gpu_device_id=" + std::to_string(requested_gpu_device_id) +
+                ", sensor_orientation=" + mounting_orientation);
         } else {
             warn_and_log(
                 "Retrying " + tracker_label + " body tracker with fallback mode: " + mode +
@@ -2096,6 +2144,54 @@ const char *joint_confidence_to_string(k4abt_joint_confidence_level_t confidence
         return "UNKNOWN";
     }
 }
+
+class FloorCoordinateWriter {
+public:
+    void open_if_enabled(const AppConfig &config, const fs::path &config_path)
+    {
+        if (config.coordinate_output_frame == "native") return;
+        const auto directory = resolve_output_path(config.coordinate_output_dir, config_path) / make_capture_session_name();
+        if (!fs::create_directories(directory)) {
+            throw std::runtime_error("Coordinate session directory already exists: " + directory.string());
+        }
+        fs::copy_file(config_path, directory / "config.json");
+        path_ = directory / "coordinates.csv";
+        stream_.open(path_);
+        if (!stream_) throw std::runtime_error("Cannot open coordinate CSV: " + path_.string());
+        stream_ << "frame_index,host_timestamp_ms,base_body_timestamp_us,aux_body_timestamp_us,source,output_frame,"
+                   "x_mm,y_mm,z_mm,base_floor_x_mm,base_floor_y_mm,base_floor_z_mm,"
+                   "aux_floor_90_x_mm,aux_floor_90_y_mm,aux_floor_90_z_mm\n";
+        stream_ << std::fixed << std::setprecision(3);
+        stream_.flush();
+    }
+
+    bool enabled() const { return stream_.is_open(); }
+    const fs::path &path() const { return path_; }
+
+    void write(const std::string &frame, const std::string &source,
+               k4abt_frame_t base_body, k4abt_frame_t aux_body,
+               const coordinates::Point &floor, const coordinates::Point &virtual_aux)
+    {
+        const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        stream_ << ++index_ << ',' << milliseconds << ',';
+        if (base_body != nullptr) stream_ << k4abt_frame_get_device_timestamp_usec(base_body);
+        stream_ << ',';
+        if (aux_body != nullptr) stream_ << k4abt_frame_get_device_timestamp_usec(aux_body);
+        stream_ << ',' << source << ',' << frame;
+        for (const auto &point : {frame == "base_floor" ? floor : virtual_aux, floor, virtual_aux}) {
+            for (double coordinate : point) stream_ << ',' << coordinate;
+        }
+        stream_ << '\n';
+        if (index_ % 30 == 0) stream_.flush();
+        if (!stream_) throw std::runtime_error("Failed writing coordinate CSV: " + path_.string());
+    }
+
+private:
+    fs::path path_;
+    std::ofstream stream_;
+    uint64_t index_ = 0;
+};
 
 class FusionTraceWriter {
 public:
@@ -2823,6 +2919,11 @@ int main(int argc, char **argv)
         std::cout << "PTU enabled: " << (config.enable_ptu ? "true" : "false") << '\n';
         std::cout << "Body tracking enabled: " << (config.enable_body_tracking ? "true" : "false") << '\n';
         std::cout << "Aux body tracking enabled: " << (config.enable_aux_body_tracking ? "true" : "false") << '\n';
+        info_and_log("Sensor orientations: base=" + config.base_sensor_orientation + ", aux=" + config.aux_sensor_orientation);
+        info_and_log("Coordinate output frame: " + config.coordinate_output_frame);
+        if (config.coordinate_output_frame != "native") {
+            info_and_log("Floor axes [mm]: X=right, Y=height above floor, Z=forward; BASE origin is projected onto floor.");
+        }
         std::cout << "Max aux body match error [mm]: " << config.max_aux_body_match_error_mm << '\n';
         std::cout << "Body tracking mode: " << config.body_tracking_mode << '\n';
         std::cout << "Body tracking gpu_device_id: " << config.body_tracking_gpu_device_id << '\n';
@@ -3043,6 +3144,7 @@ int main(int argc, char **argv)
                     config.body_tracking_mode,
                     config.body_tracking_gpu_device_id,
                     body_tracking_model_path_string,
+                    config.aux_sensor_orientation,
                     &aux_tracker,
                     &aux_tracker_mode_in_use)) {
                 warn_and_log("Failed to create auxiliary body tracker.");
@@ -3078,6 +3180,7 @@ int main(int argc, char **argv)
                     config.body_tracking_mode,
                     config.body_tracking_gpu_device_id,
                     body_tracking_model_path_string,
+                    config.base_sensor_orientation,
                     &base_tracker,
                     &base_tracker_mode_in_use)) {
                 warn_and_log("Failed to create base body tracker.");
@@ -3175,6 +3278,12 @@ int main(int argc, char **argv)
         fusion_trace_writer.open_if_enabled(config, config_path);
         if (fusion_trace_writer.enabled()) {
             info_and_log("Fusion trace CSV: " + fusion_trace_writer.path().string());
+        }
+
+        FloorCoordinateWriter floor_coordinate_writer;
+        floor_coordinate_writer.open_if_enabled(config, config_path);
+        if (floor_coordinate_writer.enabled()) {
+            info_and_log("Floor coordinate CSV: " + floor_coordinate_writer.path().string());
         }
 
         LatestCapturePump base_capture_pump;
@@ -3670,6 +3779,22 @@ int main(int argc, char **argv)
                 last_fused_tracked_ear = fused_ear;
                 last_fused_tracked_ear_2d = convert_3d_to_color_2d(base_calibration, *fused_ear);
 
+                if (floor_coordinate_writer.enabled()) {
+                    const auto floor = config.floor_transform.to_floor(*fused_ear);
+                    const auto virtual_aux = config.floor_transform.to_virtual_aux_90(floor);
+                    const auto &output = config.coordinate_output_frame == "base_floor" ? floor : virtual_aux;
+                    floor_coordinate_writer.write(config.coordinate_output_frame, fused_ear_source,
+                                                  base_body_frame, aux_body_frame, floor, virtual_aux);
+                    std::cout << "Coordinates " << config.coordinate_output_frame << " [mm]: "
+                              << output[0] << ", " << output[1] << ", " << output[2] << '\n';
+                    std::wostringstream label;
+                    label << (config.coordinate_output_frame == "base_floor" ? L"BASE FLOOR" : L"AUX FLOOR 90")
+                          << std::fixed << std::setprecision(0)
+                          << L" [mm]  X " << output[0] << L"   Y(height) " << output[1] << L"   Z " << output[2];
+                    base_image_window.show_status(label.str(), std::chrono::milliseconds(1000));
+                    if (aux_window_initialized) aux_image_window.show_status(label.str(), std::chrono::milliseconds(1000));
+                }
+
                 std::cout << "Fused " << config.tracked_ear << " ear [mm]: "
                           << (*fused_ear)[0] << ", "
                           << (*fused_ear)[1] << ", "
@@ -3754,7 +3879,7 @@ int main(int argc, char **argv)
                     draw_circle_bgra(display_buffer, color_width, color_height, cx, cy, 20);
                 }
 
-                base_image_window.show_bgra(display_buffer.data());
+                base_image_window.show_bgra(display_buffer.data(), config.base_sensor_orientation == "flip180");
             }
 
             if (aux_window_initialized) {
@@ -3778,7 +3903,7 @@ int main(int argc, char **argv)
                         draw_circle_bgra(display_buffer, aux_color_width, aux_color_height, cx, cy, 20);
                     }
 
-                    aux_image_window.show_bgra(display_buffer.data());
+                    aux_image_window.show_bgra(display_buffer.data(), config.aux_sensor_orientation == "flip180");
                 } else if (aux_depth_image != nullptr && aux_depth_width > 0 && aux_depth_height > 0) {
                     std::vector<uint8_t> display_buffer = make_depth_bgra_buffer(aux_depth_image);
 
@@ -3793,7 +3918,7 @@ int main(int argc, char **argv)
                         draw_circle_bgra(display_buffer, aux_depth_width, aux_depth_height, cx, cy, 20);
                     }
 
-                    aux_image_window.show_bgra(display_buffer.data());
+                    aux_image_window.show_bgra(display_buffer.data(), config.aux_sensor_orientation == "flip180");
                 }
             }
 

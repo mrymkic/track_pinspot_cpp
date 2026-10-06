@@ -136,6 +136,8 @@ build_2cam_x64\track_test_cpp_2cam.exe track_config_2.json
 
 高さを固定した台座を水平移動させて床校正用の画像を撮る場合は、[`tools/floor_capture.md`](./tools/floor_capture.md) の手順で `capture_floor.cmd` を起動します。現在のボードは10×7マス（内側コーナー9×6）、1マス22mmです。基準点は白黒格子の下端中央で、床からの実測高さ1017mmを登録済みです。
 
+2026-10-06の撮影から求めた床校正は [`track_config_2_floor.json`](./track_config_2_floor.json) に登録しています。`track_floor.cmd` で起動すると、右耳の座標をBASE基準の床座標（X左右・Y高さ・Z前後、mm）で表示し、`floor_tracking/<日時>/coordinates.csv` に記録します。AUXの上下逆設置も補正済みです。CSVには仮想90度のAUX床座標も保存します。校正の再計算と座標系の定義は撮影手順の「撮影後の校正と追跡」を参照してください。
+
 詳しくは [`tools/checkerboard_calibration.md`](./tools/checkerboard_calibration.md) を参照してください。  
 ここでは最短手順だけまとめます。
 

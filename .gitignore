@@ -44,6 +44,7 @@ track_test_2_runtime.log
 *.mkv
 calibration_images/
 floor_calibration_images/
+floor_tracking/
 fusion_eval/
 tools/checkerboard_rig_live.json
 評価手法/

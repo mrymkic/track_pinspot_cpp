@@ -413,6 +413,7 @@ function(add_track_target target_name source_name config_name)
         foreach(extra_config
             track_config_2_bt_cuda_lite_dual_eval.json
             track_config_2_capture_images.json
+            track_config_2_floor.json
         )
             add_custom_command(TARGET ${target_name} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -513,3 +514,8 @@ endfunction()
 add_track_target(track_test_cpp "track_test.cpp" "track_config.json")
 add_track_target(track_test_cpp_2cam "track_test_2.cpp" "track_config_2.json")
 add_k4a_utility_target(export_kinect_rig_calibration "tools/export_kinect_rig_calibration.cpp")
+
+enable_testing()
+add_executable(test_coordinate_output "tests/test_coordinate_output.cpp")
+target_include_directories(test_coordinate_output PRIVATE "${CMAKE_SOURCE_DIR}")
+add_test(NAME coordinate_output COMMAND test_coordinate_output)

@@ -99,7 +99,27 @@ floor_calibration_images/<日時>/
 
 下端中央の位置は検出した格子の寸法と姿勢から求めます。内側交点から22mm分をボード面に沿って延長するので、ボードやKinectの傾きも反映します。
 
-撮影データはGit管理から除外しています。床への変換行列の推定と追跡座標への適用は、この撮影データを使う次の工程です。
+撮影データはGit管理から除外しています。撮影後は、以下の手順で床への変換と2台の位置合わせを計算できます。
+
+## 撮影後の校正と追跡
+
+撮影画面を終了してから実行します。`<撮影日時>` は保存先のフォルダ名に置き換えます。
+
+```powershell
+python tools/calibrate_floor.py floor_calibration_images/<撮影日時> --output calibration/floor_calibration.json --template track_config_2.json --config-out track_config_2_floor.json
+.\build_2cam_x64.cmd
+.\track_floor.cmd
+```
+
+今回の2026-10-06の撮影結果は、`calibration/floor_calibration_20261006.json` と `track_config_2_floor.json` に反映済みです。起動は **`track_floor.cmd`** です。BASEの光学中心を床へ鉛直に下ろした点を原点として、XはBASEの右方向、Yは床からの高さ、ZはBASEが見る前方向を表します。単位はmmで、床面のYは0です。追跡対象は既存設定と同じ右耳です。
+
+2台の実際の位置関係を校正してから、出力だけ床座標へ変換します。画像投影と追跡の統合には実際のカメラ間変換を使います。AUXのbody trackerには `flip180` を渡し、AUXの表示も正立させます。PTU設定は元の設定を引き継ぎ、今回のプロファイルでは無効です。
+
+画面とコンソールに `BASE FLOOR [mm]` の座標が表示されます。`floor_tracking/<起動日時>/coordinates.csv` に、選択した出力の `x_mm,y_mm,z_mm`、BASE床座標、仮想90度AUX座標、取得元とbody frameの時刻を保存します。同じフォルダの `config.json` はその実行の設定のコピーです。座標が検出されないフレームにはCSV行を追加しません。撮影画像と追跡CSVはGitに含めません。
+
+仮想90度のAUX座標を画面・コンソールの出力にする場合は、`track_config_2_floor.json` の `coordinate_output_frame` を `aux_floor_90` に変更します。原点はAUXを床へ鉛直に下ろした点で、Yは床からの高さ、ZはBASE床座標の+X方向、XはBASE床座標の−Z方向です。2つの床座標系の向きは厳密に90度になり、同じ物理点を変換できます。CSVにはどちらの座標も入るので、通常は `base_floor` のままで使えます。
+
+今回の5か所では基準点の平面残差RMSが約0.50mm、両カメラの格子位置合わせRMSが約6.09mmでした。これはデータ内の整合性で、絶対位置精度の保証ではありません。カメラを動かした場合や、格子寸法・基準高さを修正した場合は再撮影・再校正します。
 
 ## 接続・保存の確認
 
