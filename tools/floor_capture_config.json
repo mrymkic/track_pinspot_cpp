@@ -14,6 +14,7 @@
     "aux_kinect_serial": "000535121612",
     "subordinate_delay_off_master_usec": 160,
     "manual_exposure_usec": 30000,
+    "color_resolution": "1440p",
     "preview_gamma": 1.8,
     "max_reprojection_error_px": 2.0,
     "output_root": "../floor_calibration_images",

@@ -99,7 +99,8 @@ class FloorCaptureTests(unittest.TestCase):
                                                     flags=cv2.CALIB_CB_NORMALIZE_IMAGE)
         self.assertTrue(found)
         for detected in (corners.copy(), corners[::-1].copy()):
-            with patch("capture_floor_calibration.cv2.findChessboardCornersSB", return_value=(True, detected)):
+            with patch("capture_floor_calibration.cv2.findChessboardCorners", return_value=(False, None)), \
+                 patch("capture_floor_calibration.cv2.findChessboardCornersSB", return_value=(True, detected)):
                 _, _, observation = board_observation(frame(image), calibration("base"), self.settings, "base", "auto_bottom")
             np.testing.assert_allclose(observation["reference_point_raw_color_px"], [319.5, 359.5], atol=0.1)
 

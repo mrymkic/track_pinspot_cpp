@@ -16,7 +16,7 @@ from calibrate_checkerboard_extrinsics import (
     _apply_corner_order, _compose_color_pose_into_depth, _import_dependencies, _load_rig_calibration,
     _make_board_object_points, _solve_checkerboard_pose,
 )
-from kinect_capture import DualKinectCapture
+from kinect_capture import COLOR_RESOLUTIONS, DualKinectCapture
 from floor_capture_viewer import CaptureViewer
 
 JST = timezone(timedelta(hours=9))
@@ -44,6 +44,8 @@ def read_settings(path):
     gamma = settings.setdefault("preview_gamma", 1.8)
     if not math.isfinite(gamma) or not 0.7 <= gamma <= 3.0:
         raise ValueError("preview_gamma must be between 0.7 and 3.0.")
+    if settings.setdefault("color_resolution", "720p") not in COLOR_RESOLUTIONS:
+        raise ValueError("color_resolution must be 720p, 1080p, or 1440p.")
     kind = settings.setdefault("reference_point_kind", "inner_corner")
     if kind == "inner_corner":
         index = settings["reference_corner_index"]
@@ -107,9 +109,10 @@ def detect_board(preview, settings, corner_order):
     # Keep small squares at native resolution and enhance local contrast for dark boards.
     gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(full_gray)
     pattern = (settings["board_cols"], settings["board_rows"])
-    found, corners = cv2.findChessboardCornersSB(gray, pattern, flags=cv2.CALIB_CB_NORMALIZE_IMAGE)
+    found, corners = cv2.findChessboardCorners(gray, pattern,
+                                             flags=cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_FAST_CHECK | cv2.CALIB_CB_NORMALIZE_IMAGE)
     if not found:
-        found, corners = cv2.findChessboardCorners(gray, pattern, flags=cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_FAST_CHECK)
+        found, corners = cv2.findChessboardCornersSB(gray, pattern, flags=cv2.CALIB_CB_NORMALIZE_IMAGE)
     if not found or corners is None:
         return None
     corners = corners.reshape(-1, 2).astype(np.float32)
@@ -168,7 +171,7 @@ def create_session(settings, height, kind="floor_horizontal_translation"):
     subprocess.run([
         str(exporter), "--output", str(rig),
         "--base-serial", settings["base_kinect_serial"], "--aux-serial", settings["aux_kinect_serial"],
-        "--depth-mode", "wfov_2x2binned", "--color-resolution", "720p",
+        "--depth-mode", "wfov_2x2binned", "--color-resolution", settings["color_resolution"],
     ], check=True)
     payload = dict(
         schema="floor-capture-session-v2", dataset_kind=kind,
@@ -229,7 +232,7 @@ def save_capture(session, index, pair, observations, height):
 def cameras_for(settings):
     return DualKinectCapture(Path(settings["sdk_directory"]), settings["base_kinect_serial"],
                              settings["aux_kinect_serial"], settings["subordinate_delay_off_master_usec"],
-                             settings["manual_exposure_usec"])
+                             settings["manual_exposure_usec"], settings["color_resolution"])
 
 
 def brighten_preview(preview, gamma):

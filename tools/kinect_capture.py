@@ -12,6 +12,8 @@ import time
 
 import numpy as np
 
+COLOR_RESOLUTIONS = {"720p": 1, "1080p": 2, "1440p": 3}
+
 
 class DeviceConfiguration(ct.Structure):
     _fields_ = [
@@ -57,7 +59,7 @@ def choose_pair(base_frames, aux_frames, offset_us, tolerance_us=2000):
 
 class DualKinectCapture:
     def __init__(self, dll_directory: Path, base_serial: str, aux_serial: str,
-                 delay_us: int = 160, exposure_us: int = 30000):
+                 delay_us: int = 160, exposure_us: int = 30000, color_resolution: str = "720p"):
         if os.name != "nt" or ct.sizeof(ct.c_void_p) != 8:
             raise RuntimeError("Live Kinect capture requires 64-bit Python on Windows.")
         if not base_serial or not aux_serial or base_serial == aux_serial:
@@ -66,6 +68,9 @@ class DualKinectCapture:
             raise ValueError("Subordinate delay must be in [0, 33333) microseconds.")
         if not isinstance(exposure_us, int) or isinstance(exposure_us, bool) or not 500 <= exposure_us <= 33330:
             raise ValueError("Manual exposure must be an integer from 500 to 33330 microseconds at 30 FPS.")
+        if color_resolution not in COLOR_RESOLUTIONS:
+            raise ValueError("Color resolution must be 720p, 1080p, or 1440p.")
+        self.color_resolution = COLOR_RESOLUTIONS[color_resolution]
         self._dll_directory = os.add_dll_directory(str(dll_directory.resolve()))
         try:
             self.sdk = ct.CDLL(str(dll_directory.resolve() / "k4a.dll"))
@@ -162,7 +167,7 @@ class DualKinectCapture:
             subordinate = "aux" if self.master == "base" else "base"
             for role in (subordinate, self.master):
                 mode = 1 if role == self.master else 2
-                config = DeviceConfiguration(3, 1, 3, 2, True, 0, mode, self.delay_us if mode == 2 else 0, False)
+                config = DeviceConfiguration(3, self.color_resolution, 3, 2, True, 0, mode, self.delay_us if mode == 2 else 0, False)
                 self._check(self.sdk.k4a_device_start_cameras(self.devices[role], ct.byref(config)), f"Start {role}")
                 self._started.append(role)
             actual_exposures = []
