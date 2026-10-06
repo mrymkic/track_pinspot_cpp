@@ -8,6 +8,7 @@ Azure Kinect 2台を使って、耳の 3D 座標を追跡しながら `base` / `
 ## 最新状態
 
 - 2台の Kinect を `MASTER / SUBORDINATE` で有線同期して使用します。
+- 同期ケーブルの接続端子を読み取り、Sync Out 側を `MASTER`、Sync In 側を `SUBORDINATE` にして、`SUBORDINATE` から起動します。`base` / `aux` はシリアル番号で固定したまま、どちらの配線方向にも対応します。
 - `base` と `aux` の両方で body tracking を有効化できます。
 - 追跡対象は耳です。複数人が写っていても、選択したカメラで最前面にいる 1 人だけを追跡します。
 - 最前面の判定対象カメラは `tracked_person_camera` で切り替えできます。
@@ -73,7 +74,7 @@ Azure Kinect 2台を使って、耳の 3D 座標を追跡しながら `base` / `
   - `left` / `right`
 - `tracked_person_camera`
   - `base` または `aux`
-  - 同義語として `main` / `master` は `base`、`sub` / `subordinate` は `aux` として扱います
+  - 旧設定との互換用の同義語として `main` / `master` は `base`、`sub` / `subordinate` は `aux` として扱います。同期の役割はケーブルの接続端子から決まるため、指定には `base` / `aux` を推奨します
 - `fusion_mode`
   - `depth_only` または `full_3d`
 - `aux_view_mode`

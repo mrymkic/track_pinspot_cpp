@@ -1604,7 +1604,7 @@ const char *wired_sync_mode_to_string(k4a_wired_sync_mode_t mode)
 
 k4a_device_configuration_t make_aux_device_config(
     const k4a_device_configuration_t &base_config,
-    bool standalone_mode,
+    k4a_wired_sync_mode_t wired_sync_mode,
     uint32_t subordinate_delay_off_master_usec,
     bool synchronized_images_only)
 {
@@ -1612,13 +1612,39 @@ k4a_device_configuration_t make_aux_device_config(
     aux_config.color_format = K4A_IMAGE_FORMAT_COLOR_MJPG;
     aux_config.color_resolution = base_config.color_resolution;
     aux_config.synchronized_images_only = synchronized_images_only;
-    aux_config.wired_sync_mode = standalone_mode
-        ? K4A_WIRED_SYNC_MODE_STANDALONE
-        : K4A_WIRED_SYNC_MODE_SUBORDINATE;
-    aux_config.subordinate_delay_off_master_usec = standalone_mode
-        ? 0
-        : subordinate_delay_off_master_usec;
+    aux_config.wired_sync_mode = wired_sync_mode;
+    aux_config.subordinate_delay_off_master_usec =
+        wired_sync_mode == K4A_WIRED_SYNC_MODE_SUBORDINATE ? subordinate_delay_off_master_usec : 0;
     return aux_config;
+}
+
+bool select_base_as_sync_master(k4a_device_t base_device, k4a_device_t aux_device)
+{
+    bool base_sync_in = false;
+    bool base_sync_out = false;
+    bool aux_sync_in = false;
+    bool aux_sync_out = false;
+    check_k4a(
+        k4a_device_get_sync_jack(base_device, &base_sync_in, &base_sync_out),
+        "Failed to read base Kinect sync jack state");
+    check_k4a(
+        k4a_device_get_sync_jack(aux_device, &aux_sync_in, &aux_sync_out),
+        "Failed to read auxiliary Kinect sync jack state");
+    info_and_log(
+        "Sync jack state: base_sync_in=" + std::to_string(base_sync_in) +
+        " base_sync_out=" + std::to_string(base_sync_out) +
+        " aux_sync_in=" + std::to_string(aux_sync_in) +
+        " aux_sync_out=" + std::to_string(aux_sync_out));
+
+    if (base_sync_out && !base_sync_in && aux_sync_in) {
+        return true;
+    }
+    if (aux_sync_out && !aux_sync_in && base_sync_in) {
+        return false;
+    }
+    throw std::runtime_error(
+        "No valid wired-sync connection detected. Connect base Sync Out -> aux Sync In "
+        "or aux Sync Out -> base Sync In.");
 }
 
 bool start_aux_camera_with_mode(
@@ -2880,10 +2906,6 @@ int main(int argc, char **argv)
                 "Kinect serials are not fully pinned in the config. "
                 "If Windows changes device index order, checkerboard extrinsics may be applied to the wrong camera.");
         }
-        std::cout << "Base Kinect role: MASTER (device index " << base_device_index
-                  << ", serial " << (base_device_serial_in_use.empty() ? "unknown" : base_device_serial_in_use) << ")" << '\n';
-        std::cout << "Aux Kinect role: SUBORDINATE (device index " << aux_device_index
-                  << ", serial " << (aux_device_serial_in_use.empty() ? "unknown" : aux_device_serial_in_use) << ")" << '\n';
         append_runtime_log("Base Kinect device index: " + std::to_string(base_device_index));
         append_runtime_log("Aux Kinect device index: " + std::to_string(aux_device_index));
         append_runtime_log("Base Kinect serial in use: " + base_device_serial_in_use);
@@ -2924,35 +2946,71 @@ int main(int argc, char **argv)
             warn_and_log("Continuing with base Kinect only.");
         }
 
+        const bool base_is_sync_master = !aux_camera_enabled ||
+            select_base_as_sync_master(base_device, aux_device);
+        const auto base_sync_mode = base_is_sync_master
+            ? K4A_WIRED_SYNC_MODE_MASTER : K4A_WIRED_SYNC_MODE_SUBORDINATE;
+        const auto aux_sync_mode = base_is_sync_master
+            ? K4A_WIRED_SYNC_MODE_SUBORDINATE : K4A_WIRED_SYNC_MODE_MASTER;
+        info_and_log(
+            "Base Kinect role: " + std::string(wired_sync_mode_to_string(base_sync_mode)) +
+            " (device index " + std::to_string(base_device_index) +
+            ", serial " + base_device_serial_in_use + ")");
+        info_and_log(
+            "Aux Kinect role: " + std::string(aux_camera_enabled
+                ? wired_sync_mode_to_string(aux_sync_mode) : "disabled") +
+            " (device index " + std::to_string(aux_device_index) +
+            ", serial " + aux_device_serial_in_use + ")");
+
         k4a_device_configuration_t base_config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
         base_config.camera_fps = K4A_FRAMES_PER_SECOND_30;
         base_config.color_format = K4A_IMAGE_FORMAT_COLOR_BGRA32;
         base_config.color_resolution = K4A_COLOR_RESOLUTION_720P;
         base_config.depth_mode = K4A_DEPTH_MODE_WFOV_2X2BINNED;
         base_config.synchronized_images_only = true;
-        base_config.wired_sync_mode = K4A_WIRED_SYNC_MODE_MASTER;
+        base_config.wired_sync_mode = base_sync_mode;
+        base_config.subordinate_delay_off_master_usec = base_is_sync_master
+            ? 0 : config.subordinate_delay_off_master_usec;
+
+        // A standalone aux cannot drive the base when the base is subordinate.
+        const bool allow_aux_unsynced_fallback =
+            config.allow_aux_unsynced_fallback && base_is_sync_master;
+        if (config.allow_aux_unsynced_fallback && !allow_aux_unsynced_fallback) {
+            info_and_log("Aux standalone fallback disabled because the base Kinect requires auxiliary master sync pulses.");
+        }
 
         bool aux_is_unsynced = false;
         bool aux_unsynced_fallback_attempted = false;
         k4a_calibration_t aux_calibration{};
         k4a_device_configuration_t aux_config = make_aux_device_config(
             base_config,
-            false,
+            aux_sync_mode,
             config.subordinate_delay_off_master_usec,
             config.aux_synchronized_images_only);
 
         // Start the subordinate first so it can wait for the master's sync pulse.
+        if (!base_is_sync_master) {
+            info_and_log("Starting base subordinate before auxiliary master.");
+            check_k4a(k4a_device_start_cameras(base_device, &base_config), "Failed to start base subordinate cameras");
+        }
         if (aux_camera_enabled) {
             std::string aux_start_failure_stage;
             if (!start_aux_camera_with_mode(aux_device, aux_config, &aux_calibration, &aux_start_failure_stage)) {
                 warn_and_log("Failed to start auxiliary cameras at stage: " + aux_start_failure_stage);
+                if (!base_is_sync_master) {
+                    k4a_device_stop_cameras(base_device);
+                    throw std::runtime_error("Failed to start auxiliary master; base subordinate cannot receive sync pulses.");
+                }
                 warn_and_log("Continuing with base Kinect only.");
                 k4a_device_close(aux_device);
                 aux_device = nullptr;
                 aux_camera_enabled = false;
             }
         }
-        check_k4a(k4a_device_start_cameras(base_device, &base_config), "Failed to start base cameras");
+        if (base_is_sync_master) {
+            info_and_log("Starting base master after auxiliary subordinate.");
+            check_k4a(k4a_device_start_cameras(base_device, &base_config), "Failed to start base master cameras");
+        }
 
         k4a_calibration_t base_calibration{};
         check_k4a(
@@ -3052,16 +3110,18 @@ int main(int argc, char **argv)
         }
         ImageWindow base_image_window;
         ImageWindow aux_image_window;
+        const std::wstring base_role_label = base_is_sync_master ? L"MASTER" : L"SUBORDINATE";
+        const std::wstring aux_role_label = base_is_sync_master ? L"SUBORDINATE" : L"MASTER";
         bool base_window_initialized = false;
         bool aux_window_initialized = false;
         constexpr auto kWindowStatusDuration = std::chrono::milliseconds(1800);
         constexpr auto kWindowRestartStatusDuration = std::chrono::milliseconds(4200);
         const auto base_window_size = color_resolution_to_size(base_config.color_resolution);
         if (!base_image_window.create(
-                L"Base Azure Kinect [MASTER]",
+                L"Base Azure Kinect [" + base_role_label + L"]",
                 base_window_size[0],
                 base_window_size[1],
-                L"MASTER / Base Kinect")) {
+                base_role_label + L" / Base Kinect")) {
             throw std::runtime_error("Failed to create base image window");
         }
         base_window_initialized = true;
@@ -3077,10 +3137,10 @@ int main(int argc, char **argv)
                 ? color_resolution_to_size(aux_config.color_resolution)
                 : depth_mode_to_size(aux_config.depth_mode);
             if (!aux_image_window.create(
-                    L"Aux Azure Kinect [SUBORDINATE]",
+                    L"Aux Azure Kinect [" + aux_role_label + L"]",
                     aux_window_size[0],
                     aux_window_size[1],
-                    (config.aux_view_mode == "color") ? L"SUBORDINATE / Aux Color" : L"SUBORDINATE / Aux Depth")) {
+                    aux_role_label + ((config.aux_view_mode == "color") ? L" / Aux Color" : L" / Aux Depth"))) {
                 throw std::runtime_error("Failed to create auxiliary image window");
             }
             aux_window_initialized = true;
@@ -3139,7 +3199,7 @@ int main(int argc, char **argv)
         int consecutive_aux_capture_failures = 0;
         int successful_dual_capture_count = 0;
         bool aux_sync_checklist_logged = false;
-        bool aux_subordinate_restart_attempted = false;
+        bool aux_wired_restart_attempted = false;
         int consecutive_aux_alignment_failures = 0;
         std::array<int64_t, 5> sync_phase_baseline_samples{};
         int sync_phase_baseline_sample_count = 0;
@@ -3150,7 +3210,7 @@ int main(int argc, char **argv)
         uint64_t last_sync_sample_base_generation = 0;
         uint64_t last_sync_sample_aux_generation = 0;
         uint64_t fusion_trace_frame_index = 0;
-        bool pending_aux_subordinate_restart = false;
+        bool pending_aux_wired_restart = false;
         bool pending_aux_standalone_restart = false;
 
         std::cout << "2-Kinect tracking started. Press 'u' to force update, 'q' to quit";
@@ -3302,7 +3362,7 @@ int main(int argc, char **argv)
                 ++consecutive_base_capture_failures;
                 if (consecutive_base_capture_failures == 5 || consecutive_base_capture_failures % 30 == 0) {
                     std::string message =
-                        "Base Kinect capture stopped updating. Check master stream continuity, USB connection, and device access.";
+                        "Base Kinect capture stopped updating. Check sync stream continuity, USB connection, and device access.";
                     if (base_capture_age_ms >= 0) {
                         message += " last_base_age_ms=" + std::to_string(base_capture_age_ms);
                     }
@@ -3336,7 +3396,7 @@ int main(int argc, char **argv)
                 ++consecutive_aux_capture_failures;
                 if (consecutive_aux_capture_failures == 5 || consecutive_aux_capture_failures % 30 == 0) {
                     std::string message =
-                        "Aux Kinect capture stopped updating. Check subordinate stream continuity and device access.";
+                        "Aux Kinect capture stopped updating. Check sync stream continuity and device access.";
                     if (aux_capture_age_ms >= 0) {
                         message += " last_aux_age_ms=" + std::to_string(aux_capture_age_ms);
                     }
@@ -3357,31 +3417,31 @@ int main(int argc, char **argv)
                     !aux_is_unsynced) {
                     aux_sync_checklist_logged = true;
                     warn_and_log(
-                        "Sync checklist: verify 3.5-mm sync cable is connected MASTER Sync Out -> AUX Sync In, "
+                        "Sync checklist: verify 3.5-mm sync cable is connected MASTER Sync Out -> SUBORDINATE Sync In, "
                         "start subordinate before master, keep both devices at the same FPS, "
                         "and keep the master color camera enabled.");
                 }
                 if (!aux_is_unsynced &&
                     successful_dual_capture_count > 0 &&
-                    !aux_subordinate_restart_attempted &&
+                    !aux_wired_restart_attempted &&
                     consecutive_aux_capture_failures >= 5) {
-                    aux_subordinate_restart_attempted = true;
-                    pending_aux_subordinate_restart = true;
+                    aux_wired_restart_attempted = true;
+                    pending_aux_wired_restart = true;
                     base_image_window.show_status(
-                        L"Aux Kinect stalled; restarting subordinate stream.",
+                        L"Aux Kinect stalled; restarting wired sync stream.",
                         kWindowRestartStatusDuration);
                     show_aux_window_status(
-                        L"Aux capture stalled; restarting subordinate stream...",
+                        L"Aux capture stalled; restarting wired sync stream...",
                         kWindowRestartStatusDuration,
                         false);
                     warn_and_log(
                         "Aux Kinect capture stopped after synchronization was already established. "
-                        "Scheduling auxiliary Kinect restart while keeping subordinate sync mode.");
+                        "Scheduling auxiliary Kinect restart while keeping its wired sync mode.");
                 }
                 if (aux_camera_enabled &&
                     !aux_is_unsynced &&
                     !aux_unsynced_fallback_attempted &&
-                    config.allow_aux_unsynced_fallback &&
+                    allow_aux_unsynced_fallback &&
                     consecutive_aux_capture_failures >= 5) {
                     aux_unsynced_fallback_attempted = true;
                     pending_aux_standalone_restart = true;
@@ -3393,7 +3453,7 @@ int main(int argc, char **argv)
                         kWindowRestartStatusDuration,
                         false);
                     warn_and_log(
-                        "Aux Kinect timed out repeatedly in subordinate mode. "
+                        "Aux Kinect timed out repeatedly in wired sync mode. "
                         "Scheduling auxiliary Kinect restart in standalone mode.");
                 }
             } else {
@@ -3422,8 +3482,10 @@ int main(int argc, char **argv)
                             oss << " phase_error_us=" << *current_sync_phase_error_us;
                         }
                         oss
+                            << " base_mode=" << wired_sync_mode_to_string(base_config.wired_sync_mode)
                             << " aux_mode=" << wired_sync_mode_to_string(aux_config.wired_sync_mode)
-                            << " subordinate_delay_off_master_usec=" << aux_config.subordinate_delay_off_master_usec;
+                            << " subordinate_delay_off_master_usec=" << (base_is_sync_master
+                                ? aux_config.subordinate_delay_off_master_usec : base_config.subordinate_delay_off_master_usec);
                         info_and_log(oss.str());
                     }
                 }
@@ -3839,19 +3901,19 @@ int main(int argc, char **argv)
                 k4a_capture_release(aux_capture);
             }
 
-            if (pending_aux_subordinate_restart) {
-                pending_aux_subordinate_restart = false;
+            if (pending_aux_wired_restart) {
+                pending_aux_wired_restart = false;
                 aux_capture_pump.stop();
                 shutdown_and_destroy_tracker(&aux_tracker, "auxiliary");
                 last_aux_capture_generation_enqueued = 0;
                 last_aux_predicted_ear_2d.reset();
                 last_aux_tracked_ear_2d.reset();
                 show_aux_window_status(
-                    L"Restarting aux Kinect in subordinate mode...",
+                    L"Restarting aux Kinect in wired sync mode...",
                     kWindowRestartStatusDuration,
                     true);
                 info_and_log(
-                    "Attempting to restart auxiliary Kinect while keeping subordinate sync mode "
+                    "Attempting to restart auxiliary Kinect while keeping its wired sync mode "
                     "after releasing in-flight captures.");
                 if (restart_aux_camera_with_mode(
                         current_aux_device_index,
@@ -3866,7 +3928,7 @@ int main(int argc, char **argv)
                     consecutive_aux_capture_failures = 0;
                     successful_dual_capture_count = 0;
                     consecutive_aux_alignment_failures = 0;
-                    aux_subordinate_restart_attempted = false;
+                    aux_wired_restart_attempted = false;
                     last_sync_sample_base_generation = 0;
                     last_sync_sample_aux_generation = 0;
                     sync_phase_baseline_sample_count = 0;
@@ -3878,11 +3940,13 @@ int main(int argc, char **argv)
                         L"Aux Kinect restarted; re-learning sync baseline.",
                         kWindowRestartStatusDuration,
                         true);
-                    info_and_log("Aux Kinect restarted successfully in subordinate sync mode.");
+                    info_and_log("Aux Kinect restarted successfully in wired sync mode: " +
+                        std::string(wired_sync_mode_to_string(aux_config.wired_sync_mode)));
                     info_and_log("Sync baseline reset after auxiliary restart.");
                 } else {
-                    warn_and_log("Failed to restart auxiliary Kinect in subordinate sync mode.");
-                    if (config.allow_aux_unsynced_fallback && !aux_unsynced_fallback_attempted) {
+                    warn_and_log("Failed to restart auxiliary Kinect in wired sync mode: " +
+                        std::string(wired_sync_mode_to_string(aux_config.wired_sync_mode)));
+                    if (allow_aux_unsynced_fallback && !aux_unsynced_fallback_attempted) {
                         aux_unsynced_fallback_attempted = true;
                         pending_aux_standalone_restart = true;
                         base_image_window.show_status(
@@ -3893,8 +3957,12 @@ int main(int argc, char **argv)
                             kWindowRestartStatusDuration,
                             true);
                         warn_and_log(
-                            "Scheduling auxiliary Kinect restart in standalone mode after subordinate restart failure.");
+                            "Scheduling auxiliary Kinect restart in standalone mode after wired sync restart failure.");
                     } else {
+                        if (!base_is_sync_master) {
+                            throw std::runtime_error(
+                                "Auxiliary master restart failed; base subordinate cannot continue without sync pulses.");
+                        }
                         warn_and_log("Disabling auxiliary Kinect and continuing with base Kinect only.");
                         aux_camera_enabled = false;
                         base_image_window.show_status(
@@ -3913,7 +3981,7 @@ int main(int argc, char **argv)
                 pending_aux_standalone_restart = false;
                 const auto standalone_aux_config = make_aux_device_config(
                     base_config,
-                    true,
+                    K4A_WIRED_SYNC_MODE_STANDALONE,
                     config.subordinate_delay_off_master_usec,
                     config.aux_synchronized_images_only);
                 aux_capture_pump.stop();
