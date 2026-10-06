@@ -1,0 +1,20 @@
+{
+    "_note": "10x7 squares means 9x6 inner corners. Measure the height of the marked inner corner before capture.",
+    "board_squares_cols": 10,
+    "board_squares_rows": 7,
+    "square_size_mm": 22.0,
+    "reference_corner_index": 0,
+    "reference_height_mm": null,
+    "base_corner_order": "normal",
+    "aux_corner_order": "normal",
+    "base_preview_rotation_deg": 0,
+    "aux_preview_rotation_deg": 180,
+    "base_kinect_serial": "000522521612",
+    "aux_kinect_serial": "000535121612",
+    "subordinate_delay_off_master_usec": 160,
+    "manual_exposure_usec": 8000,
+    "max_reprojection_error_px": 2.0,
+    "output_root": "../floor_calibration_images",
+    "sdk_directory": "../build_2cam_x64",
+    "rig_exporter": "../build_2cam_x64/export_kinect_rig_calibration.exe"
+}
