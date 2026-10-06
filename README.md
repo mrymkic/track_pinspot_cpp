@@ -134,6 +134,8 @@ build_2cam_x64\track_test_cpp_2cam.exe track_config_2.json
 
 ## チェッカーボードで座標統合を合わせる手順
 
+高さを固定した台座を水平移動させて床校正用の画像を撮る場合は、[`tools/floor_capture.md`](./tools/floor_capture.md) の手順で `capture_floor.cmd` を起動します。現在のボードは10×7マス（内側コーナー9×6）、1マス22mmです。
+
 詳しくは [`tools/checkerboard_calibration.md`](./tools/checkerboard_calibration.md) を参照してください。  
 ここでは最短手順だけまとめます。
 
