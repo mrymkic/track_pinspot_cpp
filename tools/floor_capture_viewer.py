@@ -15,7 +15,12 @@ class CaptureViewer:
         self.photo = None
         self.image = tk.Label(self.root)
         self.image.pack()
-        tk.Label(self.root, text="両画面の黄色いREFを同じ印付き基準点に合わせてください。 C / Space：保存　A：aux反転　B：base反転　Q / Esc：終了").pack()
+        tk.Label(self.root, text="基準点：白黒格子の下端中央（REF BOTTOM）。格子を検出すると、基準点に黄色の丸が出ます。").pack()
+        tk.Label(self.root, text="C / Space：保存　A：aux反転　B：base反転　＋/－：画面の明るさ　Q / Esc：終了").pack()
+        buttons = tk.Frame(self.root)
+        buttons.pack()
+        tk.Button(buttons, text="明るく（＋）", command=lambda: self.keys.append(ord("+"))).pack(side=tk.LEFT)
+        tk.Button(buttons, text="暗く（－）", command=lambda: self.keys.append(ord("-"))).pack(side=tk.LEFT)
         self.root.bind("<KeyPress>", self._on_key)
         self.root.update()
 
@@ -27,6 +32,10 @@ class CaptureViewer:
             self.keys.append(27)
         elif event.keysym == "space":
             self.keys.append(ord(" "))
+        elif event.keysym in ("plus", "equal", "KP_Add"):
+            self.keys.append(ord("+"))
+        elif event.keysym in ("minus", "KP_Subtract"):
+            self.keys.append(ord("-"))
         elif event.char and event.char.lower() in ("a", "b", "c", "q"):
             self.keys.append(ord(event.char.lower()))
 

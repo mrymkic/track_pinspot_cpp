@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from capture_floor_calibration import board_observation, read_settings, reference_geometry, run_live, save_capture, validate_height
+from capture_floor_calibration import annotate, board_observation, brighten_preview, read_settings, reference_geometry, run_live, save_capture, validate_height
 from calibrate_checkerboard_extrinsics import CameraCalibration
 from kinect_capture import CameraFrame, CapturePair
 
@@ -102,6 +102,34 @@ class FloorCaptureTests(unittest.TestCase):
             with patch("capture_floor_calibration.cv2.findChessboardCornersSB", return_value=(True, detected)):
                 _, _, observation = board_observation(frame(image), calibration("base"), self.settings, "base", "auto_bottom")
             np.testing.assert_allclose(observation["reference_point_raw_color_px"], [319.5, 359.5], atol=0.1)
+
+    def test_small_dark_board_is_detected_without_reducing_its_resolution(self):
+        image = np.full((480, 640, 4), 30, np.uint8)
+        image[:, :, 3] = 255
+        image[:100, :200, :3] = 220
+        small = cv2.resize(checkerboard(), (128, 96), interpolation=cv2.INTER_AREA)
+        small[:, :, :3] = (small[:, :, :3].astype(float) * 0.12 + 5).astype(np.uint8)
+        image[160:256, 256:384] = small
+        _, _, observation = board_observation(frame(image), calibration("base"), self.settings, "base", "auto_bottom")
+        self.assertIsNotNone(observation)
+        self.assertLess(observation["reprojection_error_px"], 0.5)
+        np.testing.assert_allclose(observation["reference_point_raw_color_px"], [319.5, 231.5], atol=0.3)
+
+    def test_preview_brightness_does_not_modify_original_pixels(self):
+        image = np.full((120, 160, 3), 30, np.uint8)
+        before = image.copy()
+        bright = brighten_preview(image, 1.8)
+        self.assertGreater(float(bright.mean()), float(image.mean()))
+        np.testing.assert_array_equal(image, before)
+
+    def test_reference_name_is_visible_before_detection_without_a_fake_marker(self):
+        image = np.full((480, 640, 3), 30, np.uint8)
+        with patch("capture_floor_calibration.cv2.putText", wraps=cv2.putText) as text, \
+             patch("capture_floor_calibration.cv2.circle", wraps=cv2.circle) as circle:
+            annotate(image, None, None, "base", self.settings)
+        labels = [call.args[1] for call in text.call_args_list]
+        self.assertTrue(any(label.startswith("REF BOTTOM") for label in labels))
+        circle.assert_not_called()
 
     def test_capture_preserves_raw_orientation_depth_units_and_height(self):
         original = checkerboard()

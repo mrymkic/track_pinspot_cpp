@@ -41,6 +41,9 @@ def read_settings(path):
     for key in ("square_size_mm", "max_reprojection_error_px"):
         if not math.isfinite(settings[key]) or settings[key] <= 0:
             raise ValueError(f"{key} must be positive and finite.")
+    gamma = settings.setdefault("preview_gamma", 1.8)
+    if not math.isfinite(gamma) or not 0.7 <= gamma <= 3.0:
+        raise ValueError("preview_gamma must be between 0.7 and 3.0.")
     kind = settings.setdefault("reference_point_kind", "inner_corner")
     if kind == "inner_corner":
         index = settings["reference_corner_index"]
@@ -100,19 +103,21 @@ def preview_to_raw_corners(corners, width, height, rotation):
 
 
 def detect_board(preview, settings, corner_order):
-    height, width = preview.shape[:2]
-    scale = min(1.0, 960 / width)
-    small = cv2.resize(preview, (round(width * scale), round(height * scale))) if scale < 1 else preview
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    full_gray = cv2.cvtColor(preview, cv2.COLOR_BGR2GRAY)
+    # Keep small squares at native resolution and enhance local contrast for dark boards.
+    gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(full_gray)
     pattern = (settings["board_cols"], settings["board_rows"])
     found, corners = cv2.findChessboardCornersSB(gray, pattern, flags=cv2.CALIB_CB_NORMALIZE_IMAGE)
     if not found:
         found, corners = cv2.findChessboardCorners(gray, pattern, flags=cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_FAST_CHECK)
     if not found or corners is None:
         return None
-    corners = ((corners.reshape(-1, 2) + 0.5) / scale - 0.5).astype(np.float32)
-    full_gray = cv2.cvtColor(preview, cv2.COLOR_BGR2GRAY)
-    cv2.cornerSubPix(full_gray, corners, (5, 5), (-1, -1),
+    corners = corners.reshape(-1, 2).astype(np.float32)
+    grid = corners.reshape(settings["board_rows"], settings["board_cols"], 2)
+    spacing = min(np.median(np.linalg.norm(np.diff(grid, axis=0), axis=2)),
+                  np.median(np.linalg.norm(np.diff(grid, axis=1), axis=2)))
+    window = max(2, min(5, int(spacing * 0.3)))
+    cv2.cornerSubPix(full_gray, corners, (window, window), (-1, -1),
                      (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
     if corner_order.startswith("auto_bottom"):
         rows = corners.reshape(settings["board_rows"], settings["board_cols"], 2)
@@ -227,25 +232,41 @@ def cameras_for(settings):
                              settings["manual_exposure_usec"])
 
 
-def annotate(preview, corners, observation, role, settings):
-    display = preview.copy()
+def brighten_preview(preview, gamma):
+    lookup = np.rint(255 * (np.arange(256, dtype=np.float64) / 255) ** (1 / gamma)).astype(np.uint8)
+    return cv2.LUT(preview, lookup)
+
+
+def annotate(preview, corners, observation, role, settings, gamma=None):
+    display = brighten_preview(preview, settings["preview_gamma"] if gamma is None else gamma)
     if corners is not None:
         cv2.drawChessboardCorners(display, (settings["board_cols"], settings["board_rows"]), corners.reshape(-1, 1, 2), True)
-        raw_point = np.asarray(observation["reference_point_raw_color_px"], dtype=np.float32).reshape(1, 2)
-        preview_point = preview_to_raw_corners(raw_point, preview.shape[1], preview.shape[0], settings[f"{role}_preview_rotation_deg"])
-        x, y = np.rint(preview_point[0]).astype(int)
-        cv2.circle(display, (x, y), 14, (0, 255, 255), 3)
-        cv2.putText(display, reference_geometry(settings)["label"], (x + 18, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    display = cv2.resize(display, (640, 360))
     good = observation is not None and observation["reprojection_error_px"] <= settings["max_reprojection_error_px"]
     label = f"{role.upper()}  " + (f"OK {observation['reprojection_error_px']:.2f}px" if good else "CHECK BOARD")
-    cv2.putText(display, label, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 255, 0) if good else (0, 0, 255), 2)
-    return cv2.resize(display, (640, 360))
+    cv2.rectangle(display, (0, 0), (640, 58), (0, 0, 0), -1)
+    cv2.putText(display, label, (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0) if good else (0, 0, 255), 2)
+    reference_label = reference_geometry(settings)["label"]
+    cv2.putText(display, reference_label + ("  detected" if observation is not None else "  waiting for grid"),
+                (10, 49), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+    if observation is not None:
+        raw_point = np.asarray(observation["reference_point_raw_color_px"], dtype=np.float32).reshape(1, 2)
+        preview_point = preview_to_raw_corners(raw_point, preview.shape[1], preview.shape[0], settings[f"{role}_preview_rotation_deg"])
+        point = (preview_point[0] + 0.5) * np.array([640 / preview.shape[1], 360 / preview.shape[0]]) - 0.5
+        x, y = np.rint(point).astype(int)
+        cv2.circle(display, (x, y), 8, (0, 255, 255), 2)
+        text_x = max(5, min(495, x + 13))
+        text_y = max(80, min(347, y + 22))
+        cv2.rectangle(display, (text_x - 3, text_y - 17), (text_x + 135, text_y + 4), (0, 0, 0), -1)
+        cv2.putText(display, reference_label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+    return display
 
 
 def run_live(settings, height, session, manifest, duration=None):
     calibrations = dict(zip(("base", "aux"), _load_rig_calibration(session / "rig_calibration.json")))
     orders = {role: settings[f"{role}_corner_order"] for role in ("base", "aux")}
-    status = "Mark the yellow REF point on the board. Keep its height and board tilt fixed."
+    status = "Show the whole grid to BOTH cameras. REF BOTTOM appears after detection. +/-: brightness."
+    gamma = settings["preview_gamma"]
     cameras = cameras_for(settings)
     index = 1
     first_display_at = None
@@ -268,7 +289,7 @@ def run_live(settings, height, session, manifest, duration=None):
                 for role in ("base", "aux"):
                     preview, corners, observation = board_observation(getattr(pair, role), calibrations[role], settings, role, orders[role])
                     observations[role] = observation
-                    panels.append(annotate(preview, corners, observation, role, settings))
+                    panels.append(annotate(preview, corners, observation, role, settings, gamma))
                 canvas = np.vstack((np.hstack(panels), np.zeros((100, 1280, 3), np.uint8)))
                 height_label = f"{height:g} mm" if height is not None else "PREVIEW ONLY"
                 cv2.putText(canvas, f"Height {height_label} | {settings['board_cols']}x{settings['board_rows']} inner corners | square {settings['square_size_mm']:g} mm | saved {index - 1}",
@@ -282,6 +303,10 @@ def run_live(settings, height, session, manifest, duration=None):
                     break
                 if duration is not None and time.monotonic() - first_display_at >= duration:
                     break
+                if key in (ord("+"), ord("-")):
+                    gamma = round(max(0.7, min(3.0, gamma + (0.2 if key == ord("+") else -0.2))), 1)
+                    manifest["preview_gamma"] = gamma
+                    status = "Preview brightness adjusted. Saved images keep the camera's original pixels."
                 if key in (ord("a"), ord("b")):
                     if index > 1:
                         status = "Corner order is locked after the first capture. Start a new session to change it."

@@ -57,13 +57,15 @@ def choose_pair(base_frames, aux_frames, offset_us, tolerance_us=2000):
 
 class DualKinectCapture:
     def __init__(self, dll_directory: Path, base_serial: str, aux_serial: str,
-                 delay_us: int = 160, exposure_us: int = 8000):
+                 delay_us: int = 160, exposure_us: int = 30000):
         if os.name != "nt" or ct.sizeof(ct.c_void_p) != 8:
             raise RuntimeError("Live Kinect capture requires 64-bit Python on Windows.")
         if not base_serial or not aux_serial or base_serial == aux_serial:
             raise ValueError("Set two different base/aux serial numbers.")
         if not 0 <= delay_us < 33333:
             raise ValueError("Subordinate delay must be in [0, 33333) microseconds.")
+        if not isinstance(exposure_us, int) or isinstance(exposure_us, bool) or not 500 <= exposure_us <= 33330:
+            raise ValueError("Manual exposure must be an integer from 500 to 33330 microseconds at 30 FPS.")
         self._dll_directory = os.add_dll_directory(str(dll_directory.resolve()))
         try:
             self.sdk = ct.CDLL(str(dll_directory.resolve() / "k4a.dll"))
@@ -163,6 +165,16 @@ class DualKinectCapture:
                 config = DeviceConfiguration(3, 1, 3, 2, True, 0, mode, self.delay_us if mode == 2 else 0, False)
                 self._check(self.sdk.k4a_device_start_cameras(self.devices[role], ct.byref(config)), f"Start {role}")
                 self._started.append(role)
+            actual_exposures = []
+            for role, handle in self.devices.items():
+                mode, value = ct.c_int(), ct.c_int32()
+                self._check(self.sdk.k4a_device_get_color_control(handle, 0, ct.byref(mode), ct.byref(value)), "Verify exposure")
+                self.device_info[role]["exposure_us"] = value.value
+                actual_exposures.append(value.value)
+                if mode.value != 1:
+                    raise RuntimeError(f"{role}: manual exposure was not applied.")
+            if len(set(actual_exposures)) != 1:
+                raise RuntimeError("The two Kinect exposure times differ after SDK adjustment.")
             self.started_at = time.monotonic()
             for role in ("base", "aux"):
                 worker = threading.Thread(target=self._acquire, args=(role,), name=f"kinect-{role}", daemon=True)
