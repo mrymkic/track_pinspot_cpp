@@ -169,7 +169,7 @@ class FloorCaptureTests(unittest.TestCase):
             self.assertEqual(list(session.rglob("*.png")), [])
             self.assertEqual(list(session.rglob("*.json")), [])
 
-    def run_simulated_capture(self, session, keys, height, aux_has_board=True):
+    def run_simulated_capture(self, session, keys, height, aux_has_board=True, processing_seconds=0, frame_age_seconds=0):
         for name in ("base", "aux_color", "base_depth", "aux_depth", "captures"):
             (session / name).mkdir()
         original = checkerboard()
@@ -180,13 +180,25 @@ class FloorCaptureTests(unittest.TestCase):
         cameras.device_info = {"base": {"wired_sync_mode": "subordinate"}, "aux": {"wired_sync_mode": "master"}}
         cameras.cleanup_warnings = []
         cameras.offset_us = 711
-        cameras.next_pair.side_effect = lambda **kwargs: CapturePair(frame(original), frame(aux, 100711), 711)
+        clock = Mock(return_value=100.0)
+        def next_pair(**kwargs):
+            pair = CapturePair(frame(original), frame(aux, 100711), 711)
+            pair.base.received_at -= frame_age_seconds
+            pair.aux.received_at -= frame_age_seconds
+            return pair
+        def process_board(*args, **kwargs):
+            result = board_observation(*args, **kwargs)
+            clock.return_value += processing_seconds
+            return result
+        cameras.next_pair.side_effect = next_pair
         viewer = Mock()
         viewer.poll_key.side_effect = keys
         manifest = {"status": "prepared"}
         with patch("capture_floor_calibration.cameras_for", return_value=cameras), \
              patch("capture_floor_calibration._load_rig_calibration", return_value=(calibration("base"), calibration("aux"))), \
-             patch("capture_floor_calibration.CaptureViewer", return_value=viewer):
+             patch("capture_floor_calibration.CaptureViewer", return_value=viewer), \
+             patch("capture_floor_calibration.time.monotonic", clock), \
+             patch("capture_floor_calibration.board_observation", side_effect=process_board):
             count = run_live(self.settings, height, session, manifest)
         cameras.__exit__.assert_called_once()
         viewer.close.assert_called_once()
@@ -215,6 +227,25 @@ class FloorCaptureTests(unittest.TestCase):
                 self.assertEqual(manifest["captures_saved"], 0)
                 self.assertEqual(list(session.rglob("*.png")), [])
                 self.assertEqual(list((session / "captures").iterdir()), [])
+
+    def test_slow_processing_does_not_reject_a_fresh_synchronized_pair(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session = Path(temporary)
+            count, manifest = self.run_simulated_capture(session, [ord("c"), ord("q")], 1017,
+                                                          processing_seconds=1.25)
+            self.assertEqual(count, 1)
+            record = json.loads((session / "captures/0001.json").read_text())
+            self.assertEqual(record["validation"]["pair_age_at_processing_start_ms"], 0)
+            self.assertEqual(record["validation"]["processing_duration_ms"], 2500)
+            self.assertEqual(record["sync_error_us"], 0)
+
+    def test_frames_already_stale_before_processing_are_not_saved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session = Path(temporary)
+            count, manifest = self.run_simulated_capture(session, [ord("c"), ord("q")], 1017,
+                                                          frame_age_seconds=2.0)
+            self.assertEqual(count, 0)
+            self.assertEqual(list((session / "captures").iterdir()), [])
 
 
 if __name__ == "__main__":

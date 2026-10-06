@@ -192,7 +192,7 @@ def frame_metadata(frame):
                 depth_timestamp_us=frame.depth_timestamp_us, depth_system_timestamp_ns=frame.depth_system_timestamp_ns)
 
 
-def save_capture(session, index, pair, observations, height):
+def save_capture(session, index, pair, observations, height, validation=None):
     stem = f"{index:04d}"
     paths = {"base": session / "base" / (stem + ".png"),
              "aux": session / "aux_color" / (stem + ".png"),
@@ -206,6 +206,8 @@ def save_capture(session, index, pair, observations, height):
                    images={key: path.relative_to(session).as_posix() for key, path in paths.items() if key != "metadata"},
                    base={**frame_metadata(pair.base), "checkerboard": observations.get("base")},
                    aux={**frame_metadata(pair.aux), "checkerboard": observations.get("aux")})
+    if validation is not None:
+        payload["validation"] = validation
     if all(observations.get(role) is not None for role in ("base", "aux")):
         base_r = np.asarray(observations["base"]["board_to_depth_rotation"])
         aux_r = np.asarray(observations["aux"]["board_to_depth_rotation"])
@@ -288,11 +290,17 @@ def run_live(settings, height, session, manifest, duration=None):
                     if key in (27, ord("q")):
                         break
                     continue
+                processing_started_at = time.monotonic()
+                # Check acquisition freshness before validation: a slow detector must
+                # not make the same synchronized, validated snapshot ineligible.
+                pair_age_at_start = max(processing_started_at - pair.base.received_at,
+                                        processing_started_at - pair.aux.received_at)
                 observations, panels = {}, []
                 for role in ("base", "aux"):
                     preview, corners, observation = board_observation(getattr(pair, role), calibrations[role], settings, role, orders[role])
                     observations[role] = observation
                     panels.append(annotate(preview, corners, observation, role, settings, gamma))
+                processing_duration_ms = (time.monotonic() - processing_started_at) * 1000
                 canvas = np.vstack((np.hstack(panels), np.zeros((100, 1280, 3), np.uint8)))
                 height_label = f"{height:g} mm" if height is not None else "PREVIEW ONLY"
                 cv2.putText(canvas, f"Height {height_label} | {settings['board_cols']}x{settings['board_rows']} inner corners | square {settings['square_size_mm']:g} mm | saved {index - 1}",
@@ -325,10 +333,12 @@ def run_live(settings, height, session, manifest, duration=None):
                     if not all(o is not None and o["reprojection_error_px"] <= settings["max_reprojection_error_px"] for o in observations.values()):
                         status = "Not saved: show the full checkerboard to both cameras; both indicators must be OK."
                         continue
-                    if max(time.monotonic() - pair.base.received_at, time.monotonic() - pair.aux.received_at) > 1.0:
-                        status = "Not saved: image processing was too slow. Improve lighting or board visibility."
+                    if pair_age_at_start > 1.0:
+                        status = "Not saved: frames were stale before processing. Wait for a fresh synchronized pair."
                         continue
-                    record = save_capture(session, index, pair, observations, height)
+                    record = save_capture(session, index, pair, observations, height,
+                                          validation=dict(pair_age_at_processing_start_ms=pair_age_at_start * 1000,
+                                                          processing_duration_ms=processing_duration_ms))
                     manifest.update(captures_saved=index, corner_orders=orders.copy(), expected_depth_delta_us=cameras.offset_us)
                     write_json(session / "session.json", manifest)
                     status = f"Saved {record['stem']}. Move LEFT/RIGHT and FORWARD/BACK; stop before the next capture."
