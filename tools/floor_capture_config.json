@@ -9,7 +9,7 @@
     "base_corner_order": "auto_bottom",
     "aux_corner_order": "auto_bottom",
     "base_preview_rotation_deg": 0,
-    "aux_preview_rotation_deg": 180,
+    "aux_preview_rotation_deg": 0,
     "base_kinect_serial": "000522521612",
     "aux_kinect_serial": "000535121612",
     "subordinate_delay_off_master_usec": 160,

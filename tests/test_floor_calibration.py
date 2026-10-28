@@ -63,6 +63,23 @@ class FloorCalibrationTests(unittest.TestCase):
         np.testing.assert_array_equal(rotation[:, 2], [1., 0., 0.])
         self.assertEqual(origin[1], 0.)
 
+    def test_upright_aux_recovers_floor_and_generates_default_sensor_orientation(self):
+        session, captures, basis, rotation, translation = synthetic_dataset()
+        flip = np.diag([-1., -1., 1.])
+        session["settings"]["aux_preview_rotation_deg"] = 0
+        for capture in captures:
+            observation = capture["aux"]["checkerboard"]
+            for key in ("board_to_depth_rotation", "board_to_depth_translation_mm", "reference_point_depth_mm"):
+                observation[key] = (flip @ np.array(observation[key])).tolist()
+        result = calibrate(session, captures, "upright")
+        np.testing.assert_allclose(result["base_depth_to_floor"]["basis_matrix"], basis, atol=1e-9)
+        np.testing.assert_allclose(result["aux_depth_to_base_depth"]["rotation_matrix"], rotation @ flip, atol=1e-9)
+        np.testing.assert_allclose(result["aux_depth_to_base_depth"]["translation_mm"], translation, atol=1e-9)
+        np.testing.assert_allclose(result["quality"]["aux_reference_floor_mm"], result["quality"]["base_reference_floor_mm"], atol=1e-9)
+        profile = tracking_profile({}, result)
+        self.assertEqual(profile["base_sensor_orientation"], "default")
+        self.assertEqual(profile["aux_sensor_orientation"], "default")
+
     def test_rejects_collinear_positions_and_changed_reference_height(self):
         with self.assertRaisesRegex(ValueError, "collinear"):
             fit_floor([[0., 0., 1000.], [100., 0., 1000.], [200., 0., 1000.]], 1000., [0., -1., 0.])

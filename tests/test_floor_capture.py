@@ -43,6 +43,8 @@ class FloorCaptureTests(unittest.TestCase):
     def setUp(self):
         cv2.setNumThreads(2)
         self.settings = read_settings(ROOT / "tools" / "floor_capture_config.json")
+        # Keep inverted-camera coverage independent of the current physical setup.
+        self.settings["aux_preview_rotation_deg"] = 180
 
     def test_measured_square_count_becomes_correct_inner_corner_count(self):
         self.assertEqual((self.settings["board_cols"], self.settings["board_rows"]), (9, 6))
@@ -68,6 +70,16 @@ class FloorCaptureTests(unittest.TestCase):
         self.assertEqual(base["reference_kind"], "bottom_edge_center")
         np.testing.assert_allclose(base["reference_point_raw_color_px"], [319.5, 359.5], atol=0.1)
         np.testing.assert_allclose(aux["reference_point_raw_color_px"], [319.5, 119.5], atol=0.1)
+
+    def test_upright_cameras_select_the_same_bottom_reference_without_rotation(self):
+        settings = {**self.settings, "aux_preview_rotation_deg": 0}
+        original = checkerboard()
+        _, _, base = board_observation(frame(original), calibration("base"), settings, "base", "auto_bottom")
+        _, _, aux = board_observation(frame(original), calibration("aux"), settings, "aux", "auto_bottom")
+        self.assertIsNotNone(base)
+        self.assertIsNotNone(aux)
+        np.testing.assert_allclose(aux["reference_point_depth_mm"], base["reference_point_depth_mm"], atol=0.05)
+        np.testing.assert_allclose(aux["reference_point_raw_color_px"], [319.5, 359.5], atol=0.1)
 
     def test_bottom_reference_follows_board_tilt_and_measured_margin(self):
         camera = calibration("base")
