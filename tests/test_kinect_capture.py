@@ -1,12 +1,14 @@
 import sys
 from pathlib import Path
 import time
+import threading
 import unittest
+from unittest.mock import Mock
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from kinect_capture import CameraFrame, choose_pair
+from kinect_capture import CameraFrame, DualKinectCapture, choose_pair
 
 
 def frame(sequence, timestamp, received=None):
@@ -33,6 +35,27 @@ class PairingTests(unittest.TestCase):
         aux = [frame(1, 100_000 + offset, 1.1), frame(2, 133_333 + offset, 2.1)]
         matched = choose_pair(base, aux, offset)
         self.assertEqual((matched[0].sequence, matched[1].sequence), (2, 2))
+
+
+class CleanupTests(unittest.TestCase):
+    def test_failed_open_and_caller_cleanup_preserve_the_original_error(self):
+        camera = DualKinectCapture.__new__(DualKinectCapture)
+        camera.sdk = Mock()
+        camera.sdk.k4a_device_get_installed_count.return_value = 0
+        camera._stop = threading.Event()
+        camera._condition = threading.Condition()
+        camera._threads = []
+        camera._started = []
+        camera.devices = {}
+        camera._original_exposure = {}
+        camera.cleanup_warnings = []
+        directory = camera._dll_directory = Mock()
+        with self.assertRaisesRegex(RuntimeError, "Cannot open both configured Kinects"):
+            try:
+                camera.open()
+            finally:
+                camera.close()
+        directory.close.assert_called_once()
 
 
 if __name__ == "__main__":

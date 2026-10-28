@@ -309,7 +309,9 @@ class DualKinectCapture:
             self.sdk.k4a_device_close(handle)
         self.devices.clear()
         self._started.clear()
-        self._dll_directory.close()
+        if self._dll_directory is not None:
+            self._dll_directory.close()
+            self._dll_directory = None
 
     def __enter__(self):
         return self.open().start()
